@@ -1,0 +1,37 @@
+# Rust build output
+/target/
+
+# Distribution ZIPs produced by package.ps1
+/dist/
+
+# Cargo.lock: keep it for a binary (reproducible builds), ignore it for a
+# library. This project is a binary, so the file IS committed — that is why
+# it is not listed here.
+
+# Backtrace / profiling artifacts
+*.profraw
+perf.data
+perf.data.old
+flamegraph.svg
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.iml
+.fleet/
+*.swp
+*.swo
+*~
+
+# rust-analyzer
+rust-project.json
+
+# OS clutter
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# Local scratch space: handy for test photos you do not want to publish
+/scratch/
+/samples/
