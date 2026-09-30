@@ -29,7 +29,22 @@ removes the folder from the list.
 | `Esc` | Leave zoom, or cancel a key binding |
 | `Ctrl+Z` | Undo the last move |
 
-`←`, `→`, `Z`, `Space` and `Esc` are reserved and cannot be bound to a folder.
+### Contact sheet
+
+`G` switches between the single photo and a grid of thumbnails, to sort
+several photos at once.
+
+| Input | Action |
+| --- | --- |
+| Click / `Ctrl`+click / `Shift`+click | Select one / add or remove / select a range |
+| `Space` | Select or deselect the current photo |
+| `Ctrl+A` / `Esc` | Select all / clear the selection |
+| Bound key | Move the selected photos (or the current one if none) |
+| Double-click | Open the photo in single view |
+| `Ctrl+Z` | Undo the last move, the whole batch at once |
+
+`←`, `→`, `G`, `Z`, `Space` and `Esc` are reserved and cannot be bound to a
+folder.
 
 ### Notes
 

@@ -1,9 +1,9 @@
 //! egui rendering. Draws and forwards input to `PhotoSorter`; no sorting
 //! logic here.
 
-use crate::app::{visible_region, PhotoSorter, ZoomMode};
+use crate::app::{grid_columns, offset_to_reveal, visible_region, PhotoSorter, View, ZoomMode};
 use eframe::{egui, App};
-use egui::{Color32, Key, Rect, Sense, Vec2};
+use egui::{Color32, Key, Rect, Sense, Stroke, StrokeKind, Vec2};
 
 const GREEN: Color32 = Color32::from_rgb(120, 200, 120);
 
@@ -24,7 +24,9 @@ impl App for PhotoSorter {
         }
 
         self.handle_shortcuts(&ctx);
-        self.request_nearby();
+        if self.view == View::Single {
+            self.request_nearby();
+        }
 
         egui::Panel::left("folders")
             .min_size(260.0)
@@ -38,7 +40,10 @@ impl App for PhotoSorter {
                 ui.add_space(2.0);
             });
 
-        egui::CentralPanel::default_margins().show(ui, |ui| self.photo_panel(ui));
+        egui::CentralPanel::default_margins().show(ui, |ui| match self.view {
+            View::Single => self.photo_panel(ui),
+            View::Grid => self.grid_panel(ui),
+        });
     }
 }
 
@@ -51,17 +56,38 @@ impl PhotoSorter {
             return;
         }
 
-        if ctx.input(|i| i.key_pressed(Key::Space)) {
-            self.toggle_zoom();
+        if ctx.input(|i| i.key_pressed(Key::G) && !i.modifiers.command) {
+            self.toggle_view();
         }
-        if self.zoom != ZoomMode::Fit && ctx.input(|i| i.key_pressed(Key::Escape)) {
-            self.reset_zoom();
+
+        let space = ctx.input(|i| i.key_pressed(Key::Space));
+        let escape = ctx.input(|i| i.key_pressed(Key::Escape));
+        match self.view {
+            View::Single => {
+                if space {
+                    self.toggle_zoom();
+                }
+                if escape && self.zoom != ZoomMode::Fit {
+                    self.reset_zoom();
+                }
+            }
+            View::Grid => {
+                if space {
+                    self.toggle_current_selected();
+                }
+                if escape {
+                    self.clear_selection();
+                }
+                if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::A)) {
+                    self.select_all();
+                }
+            }
         }
 
         if !self.photos.is_empty() {
             for (folder_idx, key) in self.config.shortcuts() {
                 if ctx.input(|i| i.key_pressed(key) && !i.modifiers.command) {
-                    self.sort_current_into(folder_idx);
+                    self.sort_into(folder_idx);
                     break;
                 }
             }
@@ -141,7 +167,11 @@ impl PhotoSorter {
 
         for (i, folder) in self.config.target_folders.iter().enumerate() {
             ui.horizontal(|ui| {
-                let (label, color) = match folder.shortcut {
+                // A key reserved since it was bound is inactive: show it as unbound.
+                let shortcut = folder
+                    .shortcut
+                    .filter(|key| !crate::config::is_reserved(*key));
+                let (label, color) = match shortcut {
                     Some(key) => (format!("{key:?}"), GREEN),
                     None => ("--".to_string(), Color32::GRAY),
                 };
@@ -179,7 +209,7 @@ impl PhotoSorter {
             self.remove_target_folder(i);
         }
         if let Some(i) = sort_into {
-            self.sort_current_into(i);
+            self.sort_into(i);
         }
 
         ui.add_space(4.0);
@@ -228,26 +258,42 @@ impl PhotoSorter {
         });
 
         ui.add_space(10.0);
-        let zoom_label = match self.zoom {
-            ZoomMode::Fit => "Zoom: fit  (Space for 1:1)".to_string(),
-            ZoomMode::Manual(scale) => format!("Zoom: {:.0}%  (Space to fit)", scale * 100.0),
+        let view_label = match self.view {
+            View::Single => "Contact sheet (G)",
+            View::Grid => "Single photo (G)",
         };
-        if ui.button(zoom_label).clicked() {
-            self.toggle_zoom();
+        if ui.button(view_label).clicked() {
+            self.toggle_view();
         }
 
-        ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new(
+        let help = match self.view {
+            View::Single => {
+                let zoom_label = match self.zoom {
+                    ZoomMode::Fit => "Zoom: fit  (Space for 1:1)".to_string(),
+                    ZoomMode::Manual(scale) => {
+                        format!("Zoom: {:.0}%  (Space to fit)", scale * 100.0)
+                    }
+                };
+                if ui.button(zoom_label).clicked() {
+                    self.toggle_zoom();
+                }
                 "Left / Right arrows: navigate\n\
                  Bound key: sort\n\
                  Wheel: zoom, drag: pan\n\
-                 Space: fit <-> 1:1",
-            )
-            .small()
-            .italics()
-            .weak(),
-        );
+                 Space: fit <-> 1:1"
+            }
+            View::Grid => {
+                ui.label(format!("{} selected", self.selection.len()));
+                "Click, Ctrl+click, Shift+click: select\n\
+                 Space: select current, Esc: clear\n\
+                 Ctrl+A: select all\n\
+                 Bound key: sort the selection\n\
+                 Double-click: open"
+            }
+        };
+
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(help).small().italics().weak());
     }
 
     // ── Photo view ──────────────────────────────────────────────────────────
@@ -267,7 +313,14 @@ impl PhotoSorter {
         // The preview is what tells us how big the real photo is, so nothing
         // can be framed until it has arrived.
         let Some(preview) = self.current_preview() else {
-            ui.put(rect, egui::Spinner::new());
+            let unreadable = self
+                .current_photo()
+                .is_some_and(|p| self.unreadable.contains(p));
+            if unreadable {
+                ui.put(rect, egui::Label::new("Unreadable image"));
+            } else {
+                ui.put(rect, egui::Spinner::new());
+            }
             return;
         };
         let image = preview.original_size;
@@ -340,6 +393,115 @@ impl PhotoSorter {
                 };
                 response.on_hover_cursor(cursor);
             }
+        }
+    }
+}
+
+impl PhotoSorter {
+    // ── Contact sheet ───────────────────────────────────────────────────────
+
+    fn grid_panel(&mut self, ui: &mut egui::Ui) {
+        if self.photos.is_empty() {
+            ui.centered_and_justified(|ui| {
+                ui.label("Open a source folder to get started.");
+            });
+            return;
+        }
+
+        let columns = grid_columns(ui.available_width());
+        let cell = ui.available_width() / columns as f32;
+        let rows = self.photos.len().div_ceil(columns);
+
+        let mut area = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        if std::mem::take(&mut self.scroll_to_current) {
+            let (offset, height) = self.grid_viewport;
+            if let Some(y) = offset_to_reveal(self.current_index / columns, cell, offset, height) {
+                area = area.vertical_scroll_offset(y);
+            }
+        }
+
+        let mut clicked = None;
+        let mut double_clicked = None;
+        let output = area.show_viewport(ui, |ui, viewport| {
+            ui.set_height(rows as f32 * cell);
+            // Only the visible rows are laid out and drawn, however long the
+            // list is.
+            let first_row = (viewport.min.y / cell).floor().max(0.0) as usize;
+            let last_row = ((viewport.max.y / cell).ceil() as usize).min(rows);
+            let visible = first_row * columns..(last_row * columns).min(self.photos.len());
+            let origin = ui.max_rect().min;
+
+            for index in visible.clone() {
+                let (row, col) = (index / columns, index % columns);
+                let top_left = origin + Vec2::new(col as f32 * cell, row as f32 * cell);
+                let rect = Rect::from_min_size(top_left, Vec2::splat(cell)).shrink(4.0);
+                let response = ui.interact(rect, ui.id().with(("thumb", index)), Sense::click());
+                self.paint_thumbnail(ui, rect, index);
+
+                if response.double_clicked() {
+                    double_clicked = Some(index);
+                } else if response.clicked() {
+                    clicked = Some(index);
+                }
+                if let Some(name) = self.photos[index].file_name() {
+                    response.on_hover_text(name.to_string_lossy());
+                }
+            }
+            visible
+        });
+        self.grid_viewport = (output.state.offset.y, output.inner_rect.height());
+
+        // Visible thumbnails first, then one screen further down, so plain
+        // scrolling finds them ready.
+        let visible = output.inner;
+        self.request_thumbnails(visible.start..visible.end + visible.len());
+
+        if let Some(index) = double_clicked {
+            self.open_in_single_view(index);
+        } else if let Some(index) = clicked {
+            let modifiers = ui.input(|i| i.modifiers);
+            self.click_photo(index, modifiers.command, modifiers.shift);
+        }
+    }
+
+    fn paint_thumbnail(&self, ui: &egui::Ui, rect: Rect, index: usize) {
+        let painter = ui.painter();
+        let visuals = ui.visuals();
+        let path = &self.photos[index];
+
+        painter.rect_filled(rect, 4.0, visuals.extreme_bg_color);
+        match self.thumbnails.get(path) {
+            Some(texture) => {
+                // Letterboxed: the whole photo, centred in its square cell.
+                let size = texture.size_vec2();
+                let scale = (rect.width() / size.x).min(rect.height() / size.y);
+                let image_rect = Rect::from_center_size(rect.center(), size * scale);
+                let full_uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                painter.image(texture.id(), image_rect, full_uv, Color32::WHITE);
+            }
+            None => {
+                let text = if self.unreadable.contains(path) {
+                    "unreadable"
+                } else {
+                    "..."
+                };
+                painter.text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    text,
+                    egui::FontId::proportional(12.0),
+                    visuals.weak_text_color(),
+                );
+            }
+        }
+
+        if self.selection.contains(path) {
+            let stroke = Stroke::new(3.0, visuals.selection.bg_fill);
+            painter.rect_stroke(rect, 4.0, stroke, StrokeKind::Inside);
+        }
+        if index == self.current_index {
+            let stroke = Stroke::new(1.5, visuals.strong_text_color());
+            painter.rect_stroke(rect.expand(2.0), 5.0, stroke, StrokeKind::Outside);
         }
     }
 }

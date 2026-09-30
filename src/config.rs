@@ -12,6 +12,7 @@ pub const RESERVED_KEYS: &[Key] = &[
     Key::Z,
     Key::Space,
     Key::Escape,
+    Key::G, // single photo <-> contact sheet
 ];
 
 pub fn is_reserved(key: Key) -> bool {

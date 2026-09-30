@@ -7,12 +7,20 @@ use crate::files;
 use crate::loader::{Loader, Quality};
 use eframe::CreationContext;
 use egui::{Key, TextureHandle, TextureOptions, Vec2};
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::ops::Range;
+use std::path::{Path, PathBuf};
 
 /// How many preview textures stay in memory: the current photo and its
 /// neighbours.
 const TEXTURE_CACHE_SIZE: usize = 5;
+
+/// How many contact-sheet thumbnails stay in memory (~170 KB each).
+const THUMB_CACHE_SIZE: usize = 400;
+
+/// Minimum width of a contact-sheet cell, in points. Cells stretch to fill
+/// the row, so the actual width is between this and twice this.
+pub const MIN_CELL: f32 = 170.0;
 
 /// Offsets from the current photo that get preloaded.
 /// Order matters: 0 first, then the next one, which is the likeliest.
@@ -45,10 +53,18 @@ pub enum ZoomMode {
     Manual(f32),
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum View {
+    Single,
+    /// Contact sheet: a grid of thumbnails with multi-select.
+    Grid,
+}
+
 /// A completed move, kept so it can be undone.
 pub struct MoveRecord {
     pub from: PathBuf,
     pub to: PathBuf,
+    /// Position in `photos` at the moment it was removed.
     pub index: usize,
 }
 
@@ -64,6 +80,8 @@ pub struct PhotoSorter {
     /// the current zoom. At most one (a 24 MP frame is ~96 MB on the GPU).
     pub full_texture: Option<(PathBuf, TextureHandle)>,
     pub loader: Loader,
+    /// Files that failed to decode, so they are not requested again.
+    pub unreadable: HashSet<PathBuf>,
 
     /// Kept across navigation, to compare a burst at the same magnification.
     pub zoom: ZoomMode,
@@ -71,9 +89,24 @@ pub struct PhotoSorter {
     /// Also kept across navigation.
     pub pan: Vec2,
 
+    pub view: View,
+    /// Contact-sheet thumbnails, for the photos on screen and around them.
+    pub thumbnails: HashMap<PathBuf, TextureHandle>,
+    /// Selected photos on the contact sheet. Keyed by path, like the
+    /// textures, so moving photos out of the list cannot shift it.
+    pub selection: HashSet<PathBuf>,
+    /// Where a Shift+click range starts: the last photo clicked without Shift.
+    pub selection_anchor: Option<PathBuf>,
+    /// Set when the current photo changed from the keyboard, so the contact
+    /// sheet scrolls to keep it in view.
+    pub scroll_to_current: bool,
+    /// Contact-sheet scroll offset and visible height, from the last frame.
+    pub grid_viewport: (f32, f32),
+
     /// When `Some(i)`, we are waiting for a key to bind to folder `i`.
     pub listening_for_key: Option<usize>,
-    pub history: Vec<MoveRecord>,
+    /// One entry per sort action, so a batch is undone in a single step.
+    pub history: Vec<Vec<MoveRecord>>,
     pub status: String,
 }
 
@@ -83,16 +116,27 @@ impl PhotoSorter {
             .storage
             .and_then(|storage| eframe::get_value(storage, eframe::APP_KEY))
             .unwrap_or_default();
+        Self::with_config(config, cc.egui_ctx.clone())
+    }
 
+    /// Separate from `new` so tests can build an app without a window.
+    pub fn with_config(config: Config, ctx: egui::Context) -> Self {
         let mut app = Self {
             config,
             photos: Vec::new(),
             current_index: 0,
             textures: HashMap::new(),
             full_texture: None,
-            loader: Loader::new(cc.egui_ctx.clone()),
+            loader: Loader::new(ctx),
+            unreadable: HashSet::new(),
             zoom: ZoomMode::Fit,
             pan: Vec2::ZERO,
+            view: View::Single,
+            thumbnails: HashMap::new(),
+            selection: HashSet::new(),
+            selection_anchor: None,
+            scroll_to_current: false,
+            grid_viewport: (0.0, 0.0),
             listening_for_key: None,
             history: Vec::new(),
             status: String::new(),
@@ -112,6 +156,10 @@ impl PhotoSorter {
         self.photos = files::list_photos(&folder);
         self.current_index = 0;
         self.textures.clear();
+        self.thumbnails.clear();
+        self.unreadable.clear();
+        self.selection.clear();
+        self.selection_anchor = None;
         self.full_texture = None;
         self.reset_zoom();
         self.loader.forget_pending();
@@ -134,12 +182,14 @@ impl PhotoSorter {
         if !self.photos.is_empty() {
             self.current_index = (self.current_index + 1).min(self.photos.len() - 1);
             self.drop_stale_full_texture();
+            self.scroll_to_current = true;
         }
     }
 
     pub fn previous(&mut self) {
         self.current_index = self.current_index.saturating_sub(1);
         self.drop_stale_full_texture();
+        self.scroll_to_current = true;
     }
 
     fn clamp_index(&mut self) {
@@ -294,68 +344,247 @@ impl PhotoSorter {
         }
     }
 
+    // ── Contact sheet ───────────────────────────────────────────────────────
+
+    pub fn toggle_view(&mut self) {
+        match self.view {
+            View::Single => {
+                self.view = View::Grid;
+                self.scroll_to_current = true;
+            }
+            View::Grid => {
+                self.view = View::Single;
+                // Free the thumbnail threads for the previews.
+                self.loader.want_thumbnails(Vec::new());
+            }
+        }
+    }
+
+    /// Double-click on a thumbnail: show that photo on its own.
+    pub fn open_in_single_view(&mut self, index: usize) {
+        if index < self.photos.len() {
+            self.current_index = index;
+            self.drop_stale_full_texture();
+            self.toggle_view();
+        }
+    }
+
+    /// Click on a thumbnail, with the usual file-manager rules: a plain click
+    /// selects only that photo, Ctrl+click adds or removes it, Shift+click
+    /// selects everything from the last photo clicked without Shift.
+    pub fn click_photo(&mut self, index: usize, ctrl: bool, shift: bool) {
+        let Some(path) = self.photos.get(index).cloned() else {
+            return;
+        };
+        let anchor = self
+            .selection_anchor
+            .as_ref()
+            .and_then(|anchor| self.photos.iter().position(|p| p == anchor));
+
+        match anchor {
+            Some(anchor) if shift => {
+                // The anchor stays where it is, so a second Shift+click
+                // redraws the range from the same starting point.
+                let (start, end) = (anchor.min(index), anchor.max(index));
+                self.selection = self.photos[start..=end].iter().cloned().collect();
+            }
+            _ if ctrl => {
+                if !self.selection.remove(&path) {
+                    self.selection.insert(path.clone());
+                }
+                self.selection_anchor = Some(path);
+            }
+            _ => {
+                self.selection = HashSet::from([path.clone()]);
+                self.selection_anchor = Some(path);
+            }
+        }
+        self.current_index = index;
+        self.drop_stale_full_texture();
+    }
+
+    /// `Space` on the contact sheet: select or deselect the current photo.
+    pub fn toggle_current_selected(&mut self) {
+        if let Some(path) = self.current_photo().cloned() {
+            if !self.selection.remove(&path) {
+                self.selection.insert(path.clone());
+            }
+            self.selection_anchor = Some(path);
+        }
+    }
+
+    pub fn select_all(&mut self) {
+        self.selection = self.photos.iter().cloned().collect();
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
+    }
+
+    /// Queues thumbnails for the photos in `range`, in order, and evicts
+    /// those far away from it once the cache is full.
+    pub fn request_thumbnails(&mut self, range: Range<usize>) {
+        let len = self.photos.len();
+        let range = range.start.min(len)..range.end.min(len);
+
+        let wanted: Vec<PathBuf> = self.photos[range.clone()]
+            .iter()
+            .filter(|p| !self.thumbnails.contains_key(*p) && !self.unreadable.contains(*p))
+            .cloned()
+            .collect();
+        self.loader.want_thumbnails(wanted);
+
+        if self.thumbnails.len() > THUMB_CACHE_SIZE {
+            let margin = THUMB_CACHE_SIZE / 4;
+            let keep_range = range.start.saturating_sub(margin)..(range.end + margin).min(len);
+            let keep: HashSet<&PathBuf> = self.photos[keep_range].iter().collect();
+            self.thumbnails.retain(|path, _| keep.contains(path));
+        }
+    }
+
     // ── Sorting ─────────────────────────────────────────────────────────────
 
-    pub fn sort_current_into(&mut self, folder_idx: usize) {
-        let Some(source) = self.current_photo().cloned() else { return };
-        let Some(folder) = self.config.target_folders.get(folder_idx) else { return };
+    /// What a sort key moves: the selection on the contact sheet if there is
+    /// one, otherwise the current photo. In list order.
+    fn sort_targets(&self) -> Vec<PathBuf> {
+        if self.view == View::Grid && !self.selection.is_empty() {
+            self.photos
+                .iter()
+                .filter(|p| self.selection.contains(*p))
+                .cloned()
+                .collect()
+        } else {
+            self.current_photo().cloned().into_iter().collect()
+        }
+    }
+
+    pub fn sort_into(&mut self, folder_idx: usize) {
+        let targets = self.sort_targets();
+        if targets.is_empty() {
+            return;
+        }
+        let Some(folder) = self.config.target_folders.get(folder_idx) else {
+            return;
+        };
         let target_dir = folder.path.clone();
         let label = folder.display_name();
-
         if !target_dir.is_dir() {
             self.status = format!("Folder \"{label}\" no longer exists.");
             return;
         }
-        let Some(file_name) = source.file_name() else { return };
-        let destination = files::unique_destination(&target_dir, file_name);
 
-        match files::move_file(&source, &destination) {
-            Ok(()) => {
-                let was_renamed = destination.file_name() != Some(file_name);
-                self.status = if was_renamed {
-                    format!(
-                        "{} -> {label}  (renamed to {}: a file with that name existed)",
-                        file_name.to_string_lossy(),
-                        destination.file_name().unwrap_or_default().to_string_lossy()
-                    )
-                } else {
-                    format!("{} -> {label}", file_name.to_string_lossy())
-                };
-                self.history.push(MoveRecord {
-                    from: source.clone(),
-                    to: destination,
-                    index: self.current_index,
-                });
-                self.textures.remove(&source);
-                self.photos.remove(self.current_index);
-                self.clamp_index();
-                self.drop_stale_full_texture();
+        let mut batch = Vec::new();
+        let mut renamed = Vec::new();
+        let mut error = None;
+        for source in targets {
+            let Some(index) = self.photos.iter().position(|p| *p == source) else {
+                continue;
+            };
+            let Some(file_name) = source.file_name() else {
+                continue;
+            };
+            let destination = files::unique_destination(&target_dir, file_name);
+            if let Err(e) = files::move_file(&source, &destination) {
+                error = Some(e);
+                continue;
             }
-            Err(e) => self.status = format!("Move failed: {e}"),
+            if destination.file_name() != Some(file_name) {
+                renamed.push(name_of(&destination));
+            }
+
+            // Photos leave the list one at a time, in list order, and each
+            // record keeps its index at that moment. Undoing in reverse order
+            // then puts every photo back exactly where it was.
+            self.photos.remove(index);
+            if index < self.current_index {
+                self.current_index -= 1;
+            }
+            self.textures.remove(&source);
+            self.thumbnails.remove(&source);
+            self.selection.remove(&source);
+            batch.push(MoveRecord {
+                from: source,
+                to: destination,
+                index,
+            });
+        }
+        self.clamp_index();
+        self.drop_stale_full_texture();
+        self.scroll_to_current = true;
+
+        let mut status = match batch.as_slice() {
+            [] => String::new(),
+            [record] => format!("{} -> {label}", name_of(&record.from)),
+            _ => format!("{} photos -> {label}", batch.len()),
+        };
+        match renamed.as_slice() {
+            [] => {}
+            [new_name] if batch.len() == 1 => {
+                status += &format!("  (renamed to {new_name}: a file with that name existed)");
+            }
+            _ => status += &format!("  ({} renamed: names already taken)", renamed.len()),
+        }
+        if let Some(e) = error {
+            if batch.is_empty() {
+                status = format!("Move failed: {e}");
+            } else {
+                status += &format!("  Some moves failed: {e}");
+            }
+        }
+        self.status = status;
+
+        if !batch.is_empty() {
+            self.history.push(batch);
         }
     }
 
+    /// Undoes the last sort action, whether it moved one photo or many.
     pub fn undo(&mut self) {
-        let Some(record) = self.history.pop() else {
+        let Some(batch) = self.history.pop() else {
             self.status = "Nothing to undo.".into();
             return;
         };
-        match files::move_file(&record.to, &record.from) {
-            Ok(()) => {
-                let index = record.index.min(self.photos.len());
-                self.photos.insert(index, record.from.clone());
-                self.current_index = index;
-                self.drop_stale_full_texture();
-                self.status = format!(
-                    "Undone: {} is back in the source folder.",
-                    record.from.file_name().unwrap_or_default().to_string_lossy()
-                );
+
+        let mut restored = Vec::new();
+        let mut failed = Vec::new();
+        let mut error = None;
+        // Reverse order: see `sort_into`.
+        for record in batch.into_iter().rev() {
+            match files::move_file(&record.to, &record.from) {
+                Ok(()) => {
+                    let index = record.index.min(self.photos.len());
+                    self.photos.insert(index, record.from.clone());
+                    self.current_index = index;
+                    restored.push(record.from);
+                }
+                Err(e) => {
+                    error = Some(e);
+                    failed.push(record);
+                }
             }
-            Err(e) => {
-                // The file did not move, so put the record back and let the
-                // user try again.
+        }
+        // Files that did not move keep their record, so the user can retry.
+        if !failed.is_empty() {
+            failed.reverse();
+            self.history.push(failed);
+        }
+        self.drop_stale_full_texture();
+        self.scroll_to_current = true;
+        // Reselect a restored batch, so it can be sorted again at once.
+        if self.view == View::Grid && !restored.is_empty() {
+            self.selection = restored.iter().cloned().collect();
+        }
+
+        self.status = match restored.as_slice() {
+            [] => String::new(),
+            [path] => format!("Undone: {} is back in the source folder.", name_of(path)),
+            _ => format!("Undone: {} photos are back in the source folder.", restored.len()),
+        };
+        if let Some(e) = error {
+            if restored.is_empty() {
                 self.status = format!("Could not undo: {e}");
-                self.history.push(record);
+            } else {
+                self.status += &format!("  Some could not be moved back: {e}");
             }
         }
     }
@@ -375,7 +604,7 @@ impl PhotoSorter {
             .collect();
 
         for path in &wanted {
-            if !self.textures.contains_key(path) {
+            if !self.textures.contains_key(path) && !self.unreadable.contains(path) {
                 self.loader.request(path, Quality::Preview);
             }
         }
@@ -391,10 +620,10 @@ impl PhotoSorter {
             let decoded = match result {
                 Ok(decoded) => decoded,
                 Err(e) => {
-                    self.status = format!(
-                        "Unreadable image ({}): {e}",
-                        path.file_name().unwrap_or_default().to_string_lossy()
-                    );
+                    self.status = format!("Unreadable image ({}): {e}", name_of(&path));
+                    // Remembered, or it would be requested again on the next
+                    // frame, fail again, trigger a repaint, and so on forever.
+                    self.unreadable.insert(path);
                     continue;
                 }
             };
@@ -403,6 +632,13 @@ impl PhotoSorter {
             let texture = ctx.load_texture(name, decoded.image, TextureOptions::LINEAR);
 
             match quality {
+                Quality::Thumb => {
+                    // Thumbnails from a previous source folder can still
+                    // arrive after the switch.
+                    if self.photos.contains(&path) {
+                        self.thumbnails.insert(path, texture);
+                    }
+                }
                 Quality::Preview => {
                     self.textures.insert(
                         path,
@@ -423,8 +659,37 @@ impl PhotoSorter {
     }
 }
 
-// ── Zoom geometry ───────────────────────────────────────────────────────────
+/// File name for status messages.
+fn name_of(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
+}
+
+// ── Geometry ────────────────────────────────────────────────────────────────
 // Pure functions with no egui context, so they can be unit-tested.
+
+/// How many contact-sheet columns fit in `width`, with cells at least
+/// [`MIN_CELL`] wide. Always at least one.
+pub fn grid_columns(width: f32) -> usize {
+    ((width / MIN_CELL).floor() as usize).max(1)
+}
+
+/// The contact-sheet scroll offset that brings `row` fully into view, or
+/// `None` if it already is. Rows are `cell` tall; `offset` and `height`
+/// describe the visible part.
+pub fn offset_to_reveal(row: usize, cell: f32, offset: f32, height: f32) -> Option<f32> {
+    let top = row as f32 * cell;
+    let bottom = top + cell;
+    if top < offset || cell > height {
+        Some(top)
+    } else if bottom > offset + height {
+        Some(bottom - height)
+    } else {
+        None
+    }
+}
 
 /// Scale at which the whole photo just fits in the window. Never above 1.0:
 /// enlarging a small image by default only makes it blurry.
@@ -542,6 +807,125 @@ mod tests {
         assert!((down - 1.0 / ZOOM_STEP).abs() < 1e-5);
         // opposite notches cancel out exactly
         assert!((up * down - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn grid_columns_fill_the_width_and_never_drop_to_zero() {
+        assert_eq!(grid_columns(MIN_CELL * 5.5), 5);
+        assert_eq!(grid_columns(10.0), 1);
+    }
+
+    #[test]
+    fn revealing_a_row_scrolls_only_when_it_is_out_of_view() {
+        // Rows of 100, viewport showing 250..650.
+        assert_eq!(offset_to_reveal(3, 100.0, 250.0, 400.0), None);
+        assert_eq!(offset_to_reveal(1, 100.0, 250.0, 400.0), Some(100.0)); // above
+        assert_eq!(offset_to_reveal(7, 100.0, 250.0, 400.0), Some(400.0)); // below
+    }
+
+    // ── Contact sheet and batch moves, on real files ──
+
+    /// An app whose source folder holds a.jpg … e.jpg, with one empty target
+    /// folder. The files are not real images; nothing here decodes them.
+    fn sorter_with_photos(test: &str) -> (PhotoSorter, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("photo_sorter_test_app_{test}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (source, target) = (dir.join("source"), dir.join("target"));
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        for name in ["a", "b", "c", "d", "e"] {
+            std::fs::write(source.join(format!("{name}.jpg")), name).unwrap();
+        }
+
+        let mut app = PhotoSorter::with_config(Config::default(), egui::Context::default());
+        app.load_photos_from(source);
+        app.add_target_folder(target.clone());
+        (app, target)
+    }
+
+    fn stems<'a>(paths: impl IntoIterator<Item = &'a PathBuf>) -> Vec<String> {
+        let mut stems: Vec<String> = paths
+            .into_iter()
+            .map(|p| p.file_stem().unwrap().to_string_lossy().into_owned())
+            .collect();
+        stems.sort();
+        stems
+    }
+
+    fn files_in(dir: &Path) -> Vec<String> {
+        let paths: Vec<PathBuf> = files::list_photos(dir);
+        stems(&paths)
+    }
+
+    #[test]
+    fn shift_click_selects_a_range_and_ctrl_click_toggles() {
+        let (mut app, _) = sorter_with_photos("select");
+        app.click_photo(1, false, false);
+        app.click_photo(3, false, true);
+        assert_eq!(stems(&app.selection), ["b", "c", "d"]);
+
+        app.click_photo(2, true, false);
+        assert_eq!(stems(&app.selection), ["b", "d"]);
+
+        // A plain click starts over.
+        app.click_photo(4, false, false);
+        assert_eq!(stems(&app.selection), ["e"]);
+    }
+
+    #[test]
+    fn a_batch_moves_together_and_is_undone_in_one_step() {
+        let (mut app, target) = sorter_with_photos("batch");
+        app.view = View::Grid;
+        app.click_photo(1, false, false);
+        app.click_photo(3, true, false);
+
+        app.sort_into(0);
+        assert_eq!(files_in(&target), ["b", "d"]);
+        assert_eq!(stems(&app.photos), ["a", "c", "e"]);
+        assert!(app.selection.is_empty());
+
+        app.undo();
+        assert!(files_in(&target).is_empty());
+        // Back in their original places, not appended at the end.
+        let order: Vec<String> = app
+            .photos
+            .iter()
+            .map(|p| p.file_stem().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(order, ["a", "b", "c", "d", "e"]);
+        assert!(app.history.is_empty());
+        assert_eq!(stems(&app.selection), ["b", "d"]);
+    }
+
+    #[test]
+    fn without_a_selection_only_the_current_photo_moves() {
+        let (mut app, target) = sorter_with_photos("no_selection");
+        app.view = View::Grid;
+        app.current_index = 2;
+        app.sort_into(0);
+        assert_eq!(files_in(&target), ["c"]);
+    }
+
+    #[test]
+    fn the_single_view_ignores_the_selection() {
+        let (mut app, target) = sorter_with_photos("single_view");
+        app.view = View::Grid;
+        app.select_all();
+        app.toggle_view();
+        app.current_index = 0;
+        app.sort_into(0);
+        assert_eq!(files_in(&target), ["a"]);
+    }
+
+    #[test]
+    fn moving_photos_before_the_current_one_keeps_it_on_screen() {
+        let (mut app, _) = sorter_with_photos("keep_current");
+        app.view = View::Grid;
+        app.click_photo(0, false, false);
+        app.click_photo(1, true, false);
+        app.current_index = 4;
+        app.sort_into(0);
+        assert_eq!(stems(app.current_photo()), ["e"]);
     }
 
     /// Screen offset from the viewport centre of a given image point.

@@ -1,26 +1,44 @@
 //! Image decoding on background threads (a 24 MP JPEG takes about 0.4 s,
 //! which would freeze the UI).
 //!
-//! Two queues: previews are preloaded ahead of the user, so their queue is
+//! Three queues: previews are preloaded ahead of the user, so their queue is
 //! often busy. A full-resolution request has its own thread so it does not
-//! wait behind those preloads.
+//! wait behind those preloads. Contact-sheet thumbnails have a pool of
+//! threads and a queue that can be replaced wholesale (see [`ThumbQueue`]).
 
 use egui::ColorImage;
 use image::ImageDecoder; // brings the .orientation() method onto the decoder
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Condvar, Mutex};
 
 /// Previews are scaled down to this maximum size before reaching the GPU.
 /// A raw 24 MP frame takes 96 MB as RGBA; capped at 2400 px, about 23 MB.
 pub const MAX_DISPLAY_PX: u32 = 2400;
 
+/// Contact-sheet thumbnails are scaled down to this size (about 170 KB each).
+pub const THUMB_PX: u32 = 256;
+
 /// How much detail to decode.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Quality {
+    /// Scaled down to [`THUMB_PX`], for the contact sheet.
+    Thumb,
     /// Scaled down to [`MAX_DISPLAY_PX`]: what the fit-to-window view needs.
     Preview,
     /// Every pixel, for 1:1 zoom. Expensive, so only ever one at a time.
     Full,
+}
+
+impl Quality {
+    fn max_size(self) -> Option<u32> {
+        match self {
+            Quality::Thumb => Some(THUMB_PX),
+            Quality::Preview => Some(MAX_DISPLAY_PX),
+            Quality::Full => None,
+        }
+    }
 }
 
 /// A decoded image, plus the size it had before any downscaling, so that
@@ -53,8 +71,10 @@ pub fn decode(path: &Path, quality: Quality) -> Result<Decoded, String> {
     // Measured after rotation, so a portrait shot reports portrait dimensions.
     let original_size = egui::Vec2::new(img.width() as f32, img.height() as f32);
 
-    if quality == Quality::Preview && img.width().max(img.height()) > MAX_DISPLAY_PX {
-        img = img.thumbnail(MAX_DISPLAY_PX, MAX_DISPLAY_PX);
+    if let Some(max) = quality.max_size() {
+        if img.width().max(img.height()) > max {
+            img = img.thumbnail(max, max);
+        }
     }
 
     let rgba = img.into_rgba8();
@@ -72,6 +92,7 @@ pub fn decode(path: &Path, quality: Quality) -> Result<Decoded, String> {
 pub struct Loader {
     preview_sender: Sender<PathBuf>,
     full_sender: Sender<PathBuf>,
+    thumbs: Arc<ThumbQueue>,
     receiver: Receiver<LoadResult>,
     pending: Vec<(PathBuf, Quality)>,
 }
@@ -80,11 +101,17 @@ impl Loader {
     pub fn new(ctx: egui::Context) -> Self {
         let (result_tx, result_rx) = std::sync::mpsc::channel::<LoadResult>();
         let preview_sender = spawn_worker(Quality::Preview, result_tx.clone(), ctx.clone());
-        let full_sender = spawn_worker(Quality::Full, result_tx, ctx);
+        let full_sender = spawn_worker(Quality::Full, result_tx.clone(), ctx.clone());
+
+        let thumbs = Arc::new(ThumbQueue::default());
+        for _ in 0..thumb_worker_count() {
+            spawn_thumb_worker(thumbs.clone(), result_tx.clone(), ctx.clone());
+        }
 
         Self {
             preview_sender,
             full_sender,
+            thumbs,
             receiver: result_rx,
             pending: Vec::new(),
         }
@@ -96,17 +123,33 @@ impl Loader {
             .any(|(p, q)| p == path && *q == quality)
     }
 
-    /// Requests a decode. No-op if that exact work is already queued.
+    /// Requests a preview or full-resolution decode. No-op if that exact work
+    /// is already queued. Thumbnails go through [`Self::want_thumbnails`].
     pub fn request(&mut self, path: &Path, quality: Quality) {
-        if self.is_pending(path, quality) {
-            return;
-        }
-        self.pending.push((path.to_path_buf(), quality));
         let sender = match quality {
             Quality::Preview => &self.preview_sender,
             Quality::Full => &self.full_sender,
+            Quality::Thumb => unreachable!("thumbnails are queued with want_thumbnails"),
         };
+        if self.is_pending(path, quality) {
+            return;
+        }
         let _ = sender.send(path.to_path_buf());
+        self.pending.push((path.to_path_buf(), quality));
+    }
+
+    /// Replaces the thumbnail queue with `paths`, in the order given.
+    /// Anything queued before and not in `paths` is dropped, so scrolling
+    /// quickly never leaves a backlog of photos that are no longer on screen.
+    pub fn want_thumbnails(&self, paths: Vec<PathBuf>) {
+        let mut state = self.thumbs.lock();
+        state.queue = paths
+            .into_iter()
+            .filter(|p| !state.in_flight.contains(p))
+            .collect();
+        if !state.queue.is_empty() {
+            self.thumbs.ready.notify_all();
+        }
     }
 
     /// Collects everything the threads have finished decoding. Never blocks.
@@ -123,7 +166,84 @@ impl Loader {
     /// Forgets in-flight requests, used when the source folder changes.
     pub fn forget_pending(&mut self) {
         self.pending.clear();
+        self.thumbs.lock().queue.clear();
     }
+}
+
+impl Drop for Loader {
+    /// The preview and full-resolution threads stop on their own when their
+    /// channel is dropped; the thumbnail threads wait on a condition variable
+    /// and have to be told.
+    fn drop(&mut self) {
+        self.thumbs.lock().shutdown = true;
+        self.thumbs.ready.notify_all();
+    }
+}
+
+/// Thumbnail work shared by the thumbnail threads.
+///
+/// A channel cannot be emptied from the sending side, which is what the
+/// contact sheet needs: the set of visible photos changes on every scroll.
+/// A `Mutex` around a plain queue can be replaced at will, and the `Condvar`
+/// lets idle threads sleep until there is work.
+#[derive(Default)]
+struct ThumbQueue {
+    state: Mutex<ThumbState>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct ThumbState {
+    queue: VecDeque<PathBuf>,
+    /// Being decoded right now, so not worth queueing again.
+    in_flight: HashSet<PathBuf>,
+    shutdown: bool,
+}
+
+impl ThumbQueue {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ThumbState> {
+        // A poisoned lock means a thread panicked while holding it, which the
+        // code below never does (decoding happens outside the lock).
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Half the cores, between 1 and 4: enough to fill a screen of thumbnails
+/// quickly without starving the UI and preview threads.
+fn thumb_worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get() / 2)
+        .unwrap_or(1)
+        .clamp(1, 4)
+}
+
+fn spawn_thumb_worker(queue: Arc<ThumbQueue>, results: Sender<LoadResult>, ctx: egui::Context) {
+    std::thread::spawn(move || loop {
+        let path = {
+            let mut state = queue.lock();
+            loop {
+                if state.shutdown {
+                    return;
+                }
+                if let Some(path) = state.queue.pop_front() {
+                    state.in_flight.insert(path.clone());
+                    break path;
+                }
+                state = queue.ready.wait(state).unwrap_or_else(|e| e.into_inner());
+            }
+        };
+
+        let result = decode(&path, Quality::Thumb);
+        // Send before leaving `in_flight`: the other order leaves a moment
+        // where the UI has no texture and no in-flight entry, and would
+        // queue the same thumbnail again.
+        let sent = results.send((path.clone(), Quality::Thumb, result)).is_ok();
+        queue.lock().in_flight.remove(&path);
+        if !sent {
+            return;
+        }
+        ctx.request_repaint();
+    });
 }
 
 /// Starts one worker thread and returns the channel that feeds it.
@@ -195,6 +315,13 @@ mod tests {
         let ratio = size[0] as f32 / size[1] as f32;
         let expected = (MAX_DISPLAY_PX + 1200) as f32 / MAX_DISPLAY_PX as f32;
         assert!((ratio - expected).abs() < 0.01, "distorted ratio: {ratio}");
+    }
+
+    #[test]
+    fn thumbnails_are_scaled_to_thumb_size() {
+        let decoded = decode(&large_image_path(), Quality::Thumb).unwrap();
+        assert_eq!(decoded.image.size[0], THUMB_PX as usize);
+        assert!(decoded.image.size[1] < THUMB_PX as usize);
     }
 
     #[test]
