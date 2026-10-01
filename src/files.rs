@@ -57,6 +57,29 @@ pub fn unique_destination(dir: &Path, file_name: &OsStr) -> PathBuf {
     candidate
 }
 
+/// Creates `parent/name` and returns its path. `name` must be a plain folder
+/// name, not a path. An existing folder is fine and returned as is.
+pub fn create_subfolder(parent: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let name = name.trim();
+    let mut components = Path::new(name).components();
+    let is_plain_name = matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    );
+    if !is_plain_name {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid folder name",
+        ));
+    }
+
+    let path = parent.join(name);
+    if !path.is_dir() {
+        std::fs::create_dir(&path)?;
+    }
+    Ok(path)
+}
+
 /// Moves a file. `fs::rename` fails across drives, hence the copy-then-delete
 /// fallback.
 pub fn move_file(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -135,5 +158,20 @@ mod tests {
 
         // sorted by name, extensions case-insensitive, directories excluded
         assert_eq!(photos, vec!["a.PNG", "b.jpg", "c.jpeg"]);
+    }
+
+    #[test]
+    fn creates_a_subfolder_and_rejects_paths() {
+        let dir = temp_dir("subfolder");
+
+        let created = create_subfolder(&dir, "  Keep ").unwrap();
+        assert_eq!(created, dir.join("Keep"));
+        assert!(created.is_dir());
+        // Asking again for the same name just returns it.
+        assert_eq!(create_subfolder(&dir, "Keep").unwrap(), created);
+
+        for bad in ["", "   ", "..", "a/b", "../escape"] {
+            assert!(create_subfolder(&dir, bad).is_err(), "{bad:?} was accepted");
+        }
     }
 }

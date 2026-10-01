@@ -51,6 +51,15 @@ impl PhotoSorter {
     // ── Keyboard ────────────────────────────────────────────────────────────
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        // Typing a folder name must not sort photos.
+        if ctx.text_edit_focused() {
+            return;
+        }
+
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::N)) {
+            self.focus_new_folder = true;
+        }
+
         if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::Z)) {
             self.undo();
             return;
@@ -218,6 +227,28 @@ impl PhotoSorter {
                 self.add_target_folder(path);
             }
         }
+
+        // Quicker than the dialog: type a name, Enter, then press its key.
+        let has_source = self.config.source_folder.is_some();
+        ui.add_enabled_ui(has_source, |ui| {
+            ui.horizontal(|ui| {
+                let field = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.new_folder_name)
+                            .hint_text("New folder (Ctrl+N)")
+                            .desired_width(ui.available_width() - 60.0),
+                    )
+                    .on_hover_text("Created inside the source folder");
+                if std::mem::take(&mut self.focus_new_folder) {
+                    field.request_focus();
+                }
+                let entered = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                let create = ui.button("Create").clicked() || entered;
+                if create && !self.new_folder_name.trim().is_empty() {
+                    self.create_target_folder();
+                }
+            });
+        });
 
         ui.add_space(18.0);
         ui.heading("Source");

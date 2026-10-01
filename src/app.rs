@@ -105,6 +105,10 @@ pub struct PhotoSorter {
 
     /// When `Some(i)`, we are waiting for a key to bind to folder `i`.
     pub listening_for_key: Option<usize>,
+    /// Name typed in the sidebar for a new folder inside the source folder.
+    pub new_folder_name: String,
+    /// Set by `Ctrl+N`, so the sidebar puts the cursor in that field.
+    pub focus_new_folder: bool,
     /// One entry per sort action, so a batch is undone in a single step.
     pub history: Vec<Vec<MoveRecord>>,
     pub status: String,
@@ -138,6 +142,8 @@ impl PhotoSorter {
             scroll_to_current: false,
             grid_viewport: (0.0, 0.0),
             listening_for_key: None,
+            new_folder_name: String::new(),
+            focus_new_folder: false,
             history: Vec::new(),
             status: String::new(),
         };
@@ -298,13 +304,38 @@ impl PhotoSorter {
 
     // ── Target folders ──────────────────────────────────────────────────────
 
-    pub fn add_target_folder(&mut self, path: PathBuf) {
+    /// Returns `false` if the folder was refused.
+    pub fn add_target_folder(&mut self, path: PathBuf) -> bool {
         if self.config.target_folders.iter().any(|f| f.path == path) {
             self.status = "That folder is already in the list.".into();
+            false
         } else if Some(&path) == self.config.source_folder.as_ref() {
             self.status = "The target folder cannot be the source folder.".into();
+            false
         } else {
             self.config.target_folders.push(TargetFolder::new(path));
+            true
+        }
+    }
+
+    /// Creates the folder typed in the sidebar inside the source folder, adds
+    /// it as a target and waits for its key.
+    pub fn create_target_folder(&mut self) {
+        let Some(source) = self.config.source_folder.clone() else {
+            self.status = "Open a source folder first.".into();
+            return;
+        };
+        let path = match files::create_subfolder(&source, &self.new_folder_name) {
+            Ok(path) => path,
+            Err(e) => {
+                self.status = format!("Could not create the folder: {e}");
+                return;
+            }
+        };
+        if self.add_target_folder(path) {
+            self.status = format!("\"{}\" added.", self.new_folder_name.trim());
+            self.new_folder_name.clear();
+            self.listening_for_key = Some(self.config.target_folders.len() - 1);
         }
     }
 
@@ -895,6 +926,21 @@ mod tests {
         assert_eq!(order, ["a", "b", "c", "d", "e"]);
         assert!(app.history.is_empty());
         assert_eq!(stems(&app.selection), ["b", "d"]);
+    }
+
+    #[test]
+    fn a_new_folder_is_created_in_the_source_and_awaits_its_key() {
+        let (mut app, _) = sorter_with_photos("new_folder");
+        let source = app.config.source_folder.clone().unwrap();
+
+        app.new_folder_name = "Keep".into();
+        app.create_target_folder();
+        assert!(source.join("Keep").is_dir());
+        assert_eq!(app.config.target_folders[1].path, source.join("Keep"));
+        assert_eq!(app.listening_for_key, Some(1));
+        assert!(app.new_folder_name.is_empty());
+        // The new folder is not a photo.
+        assert_eq!(app.photos.len(), 5);
     }
 
     #[test]

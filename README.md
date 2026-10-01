@@ -9,7 +9,9 @@ Supported formats: JPEG, PNG, WebP, BMP, TIFF, GIF.
 ## Usage
 
 1. **Open source folder**: the folder holding the photos to sort.
-2. **+ Add target folder**: once per destination.
+2. **+ Add target folder**: once per destination. Or type a name in the
+   **New folder** field (`Ctrl+N`) and press `Enter`: the folder is created
+   inside the source folder, added, and waits for its key.
 3. Click the `--` button next to a target folder, then press the key to bind
    to it.
 4. Press the bound keys to sort.
@@ -28,6 +30,7 @@ removes the folder from the list.
 | `Space` | Toggle between fit-to-window and 1:1 |
 | `Esc` | Leave zoom, or cancel a key binding |
 | `Ctrl+Z` | Undo the last move |
+| `Ctrl+N` | Type the name of a new folder in the source folder |
 
 ### Contact sheet
 
