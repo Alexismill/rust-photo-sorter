@@ -28,6 +28,9 @@ target folders and waits for its key (`✔` when it already is one).
 `⟳` re-reads the source folder after changes made outside the app. It keeps
 the current photo, the selection and the undo history.
 
+To sort a series of folders, `Alt+→` opens the next one, and an emptied folder
+offers it with a button. Target folders are skipped.
+
 ### Keys
 
 | Key | Action |
@@ -40,6 +43,7 @@ the current photo, the selection and the undo history.
 | `Esc` | Leave zoom, or cancel a key binding |
 | `Ctrl+Z` | Undo the last move |
 | `Ctrl+N` | Type the name of a new folder in the source folder |
+| `Alt+←` / `Alt+→` | Previous / next folder beside the source folder |
 
 ### Contact sheet
 

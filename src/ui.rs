@@ -62,6 +62,16 @@ impl PhotoSorter {
             self.focus_new_folder = true;
         }
 
+        // Before the plain arrows below, which would fire as well.
+        if ctx.input(|i| i.modifiers.alt && i.key_pressed(Key::ArrowRight)) {
+            self.open_sibling(1);
+            return;
+        }
+        if ctx.input(|i| i.modifiers.alt && i.key_pressed(Key::ArrowLeft)) {
+            self.open_sibling(-1);
+            return;
+        }
+
         if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::Z)) {
             self.undo();
             return;
@@ -376,6 +386,7 @@ impl PhotoSorter {
                     self.toggle_zoom();
                 }
                 "Left / Right arrows: navigate\n\
+                 Alt+Left / Right: other folder\n\
                  Bound key: sort\n\
                  Wheel: zoom, drag: pan\n\
                  Space: fit <-> 1:1"
@@ -386,7 +397,8 @@ impl PhotoSorter {
                  Space: select current, Esc: clear\n\
                  Ctrl+A: select all\n\
                  Bound key: sort the selection\n\
-                 Double-click: open"
+                 Double-click: open\n\
+                 Alt+Left / Right: other folder"
             }
         };
 
@@ -396,11 +408,32 @@ impl PhotoSorter {
 
     // ── Photo view ──────────────────────────────────────────────────────────
 
-    fn photo_panel(&mut self, ui: &mut egui::Ui) {
-        if self.photos.is_empty() {
+    /// Shown instead of the photos when there are none. Once a folder is
+    /// done, offers the next one.
+    fn empty_panel(&mut self, ui: &mut egui::Ui) {
+        if self.config.source_folder.is_none() {
             ui.centered_and_justified(|ui| {
                 ui.label("Open a source folder to get started.");
             });
+            return;
+        }
+        ui.vertical_centered(|ui| {
+            ui.add_space(ui.available_height() / 3.0);
+            ui.label("No photos in this folder.");
+            if let Some(next) = self.next_folder.clone() {
+                ui.add_space(8.0);
+                let name = next.file_name().unwrap_or_default().to_string_lossy();
+                let label = format!("Next folder: {name}  (Alt+Right)");
+                if ui.button(label).on_hover_text(next.display().to_string()).clicked() {
+                    self.open_sibling(1);
+                }
+            }
+        });
+    }
+
+    fn photo_panel(&mut self, ui: &mut egui::Ui) {
+        if self.photos.is_empty() {
+            self.empty_panel(ui);
             return;
         }
 
@@ -500,9 +533,7 @@ impl PhotoSorter {
 
     fn grid_panel(&mut self, ui: &mut egui::Ui) {
         if self.photos.is_empty() {
-            ui.centered_and_justified(|ui| {
-                ui.label("Open a source folder to get started.");
-            });
+            self.empty_panel(ui);
             return;
         }
 

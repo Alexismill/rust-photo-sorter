@@ -76,6 +76,8 @@ pub struct PhotoSorter {
     /// Folders inside the source folder, for quick navigation. Read on each
     /// folder change or with ⟳, not every frame.
     pub subfolders: Vec<PathBuf>,
+    /// The folder after the source, offered once it has no photos left.
+    pub next_folder: Option<PathBuf>,
 
     /// Downscaled images for everyday viewing, one per nearby photo.
     pub textures: HashMap<PathBuf, Preview>,
@@ -133,6 +135,7 @@ impl PhotoSorter {
             photos: Vec::new(),
             current_index: 0,
             subfolders: Vec::new(),
+            next_folder: None,
             textures: HashMap::new(),
             full_texture: None,
             loader: Loader::new(ctx),
@@ -177,7 +180,7 @@ impl PhotoSorter {
         self.history.clear();
         self.status = photos_found(self.photos.len());
         self.config.source_folder = Some(folder);
-        self.refresh_subfolders();
+        self.refresh_folders();
     }
 
     /// `⟳`: re-reads the source folder after changes made outside the app.
@@ -202,16 +205,44 @@ impl PhotoSorter {
         self.unreadable.clear();
         self.full_texture = None;
 
-        self.refresh_subfolders();
+        self.refresh_folders();
         self.status = format!("Refreshed. {}", photos_found(self.photos.len()));
     }
 
-    /// Re-reads the source's subfolders, e.g. after creating one elsewhere.
-    pub fn refresh_subfolders(&mut self) {
+    /// Re-reads the source's subfolders and its next sibling, e.g. after
+    /// creating a folder elsewhere.
+    pub fn refresh_folders(&mut self) {
         self.subfolders = match &self.config.source_folder {
             Some(source) => files::list_subfolders(source),
             None => Vec::new(),
         };
+        self.next_folder = self.sibling_folder(1);
+    }
+
+    /// The folder `step` places away from the source among its siblings,
+    /// skipping target folders: walks through 100CANON, 101CANON, ...
+    pub fn sibling_folder(&self, step: isize) -> Option<PathBuf> {
+        let source = self.config.source_folder.as_ref()?;
+        let siblings: Vec<PathBuf> = files::list_subfolders(source.parent()?)
+            .into_iter()
+            .filter(|f| f == source || !self.is_target(f))
+            .collect();
+        let index = siblings.iter().position(|f| f == source)?;
+        siblings.get(index.checked_add_signed(step)?).cloned()
+    }
+
+    /// `Alt+Left` / `Alt+Right`, and the button shown once a folder is empty.
+    pub fn open_sibling(&mut self, step: isize) {
+        let Some(folder) = self.sibling_folder(step) else {
+            self.status = match step {
+                1 => "No next folder.".into(),
+                _ => "No previous folder.".into(),
+            };
+            return;
+        };
+        let name = name_of(&folder);
+        self.load_photos_from(folder);
+        self.status = format!("{name}: {}", self.status);
     }
 
     pub fn current_photo(&self) -> Option<&PathBuf> {
@@ -350,6 +381,8 @@ impl PhotoSorter {
             false
         } else {
             self.config.target_folders.push(TargetFolder::new(path));
+            // Targets are skipped when walking through sibling folders.
+            self.next_folder = self.sibling_folder(1);
             true
         }
     }
@@ -368,7 +401,7 @@ impl PhotoSorter {
                 return;
             }
         };
-        self.refresh_subfolders();
+        self.refresh_folders();
         if self.add_target_and_bind(path) {
             self.new_folder_name.clear();
         }
@@ -394,6 +427,7 @@ impl PhotoSorter {
     pub fn remove_target_folder(&mut self, index: usize) {
         if index < self.config.target_folders.len() {
             self.config.target_folders.remove(index);
+            self.next_folder = self.sibling_folder(1);
         }
         // Stop waiting for a key if that folder was the one being bound.
         if self.listening_for_key == Some(index) {
@@ -1017,11 +1051,26 @@ mod tests {
     }
 
     #[test]
+    fn sibling_navigation_skips_target_folders() {
+        let (mut app, _) = sorter_with_photos("siblings");
+        let source = app.config.source_folder.clone().unwrap();
+        let other = source.parent().unwrap().join("other");
+        std::fs::create_dir(&other).unwrap();
+
+        // Siblings: other, source, target. The last one is a target folder.
+        app.open_sibling(1);
+        assert_eq!(app.config.source_folder.as_ref(), Some(&source));
+        app.open_sibling(-1);
+        assert_eq!(app.config.source_folder.as_ref(), Some(&other));
+        assert_eq!(app.next_folder.as_ref(), Some(&source));
+    }
+
+    #[test]
     fn a_subfolder_becomes_a_target_once() {
         let (mut app, _) = sorter_with_photos("subfolder_target");
         let source = app.config.source_folder.clone().unwrap();
         std::fs::create_dir(source.join("Keep")).unwrap();
-        app.refresh_subfolders();
+        app.refresh_folders();
         let keep = app.subfolders[0].clone();
 
         assert!(app.add_target_and_bind(keep.clone()));
