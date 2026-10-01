@@ -342,7 +342,7 @@ impl PhotoSorter {
 
     /// Returns `false` if the folder was refused.
     pub fn add_target_folder(&mut self, path: PathBuf) -> bool {
-        if self.config.target_folders.iter().any(|f| f.path == path) {
+        if self.is_target(&path) {
             self.status = "That folder is already in the list.".into();
             false
         } else if Some(&path) == self.config.source_folder.as_ref() {
@@ -369,11 +369,26 @@ impl PhotoSorter {
             }
         };
         self.refresh_subfolders();
-        if self.add_target_folder(path) {
-            self.status = format!("\"{}\" added.", self.new_folder_name.trim());
+        if self.add_target_and_bind(path) {
             self.new_folder_name.clear();
-            self.listening_for_key = Some(self.config.target_folders.len() - 1);
         }
+    }
+
+    /// Adds a target and waits for its key at once: the quick paths from the
+    /// sidebar. Returns `false` if the folder was refused.
+    pub fn add_target_and_bind(&mut self, path: PathBuf) -> bool {
+        if !self.add_target_folder(path) {
+            return false;
+        }
+        let index = self.config.target_folders.len() - 1;
+        let name = self.config.target_folders[index].display_name();
+        self.status = format!("\"{name}\" added.");
+        self.listening_for_key = Some(index);
+        true
+    }
+
+    pub fn is_target(&self, path: &Path) -> bool {
+        self.config.target_folders.iter().any(|f| f.path == path)
     }
 
     pub fn remove_target_folder(&mut self, index: usize) {
@@ -999,6 +1014,24 @@ mod tests {
         assert!(app.new_folder_name.is_empty());
         // The new folder is not a photo.
         assert_eq!(app.photos.len(), 5);
+    }
+
+    #[test]
+    fn a_subfolder_becomes_a_target_once() {
+        let (mut app, _) = sorter_with_photos("subfolder_target");
+        let source = app.config.source_folder.clone().unwrap();
+        std::fs::create_dir(source.join("Keep")).unwrap();
+        app.refresh_subfolders();
+        let keep = app.subfolders[0].clone();
+
+        assert!(app.add_target_and_bind(keep.clone()));
+        assert!(app.is_target(&keep));
+        assert_eq!(app.listening_for_key, Some(1));
+
+        app.listening_for_key = None;
+        assert!(!app.add_target_and_bind(keep));
+        assert_eq!(app.config.target_folders.len(), 2);
+        assert_eq!(app.listening_for_key, None);
     }
 
     #[test]

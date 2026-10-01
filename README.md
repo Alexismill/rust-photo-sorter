@@ -22,7 +22,8 @@ source folder**, shows that folder in the file explorer.
 
 Under the source folder, `⬆ ..` opens its parent and the folders below it
 open a subfolder, to change the source without the dialog. Changing the
-source clears the undo history.
+source clears the undo history. `+` in front of a subfolder adds it to the
+target folders and waits for its key (`✔` when it already is one).
 
 `⟳` re-reads the source folder after changes made outside the app. It keeps
 the current photo, the selection and the undo history.

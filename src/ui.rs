@@ -303,8 +303,10 @@ impl PhotoSorter {
             }
         }
 
-        // Quick navigation: up to the parent, or down into a subfolder.
+        // Quick navigation: up to the parent, or down into a subfolder. `+`
+        // makes a subfolder a target instead.
         let mut open: Option<PathBuf> = None;
+        let mut add_target: Option<PathBuf> = None;
         let parent = self.config.source_folder.as_ref().and_then(|f| f.parent());
         if let Some(parent) = parent {
             let up = egui::Button::new("⬆  ..").frame(false);
@@ -317,13 +319,29 @@ impl PhotoSorter {
             .max_height(160.0)
             .show(ui, |ui| {
                 for folder in &self.subfolders {
-                    let name = folder.file_name().unwrap_or_default().to_string_lossy();
-                    let button = egui::Button::new(format!("🗀  {name}")).frame(false);
-                    if ui.add(button).clicked() {
-                        open = Some(folder.clone());
-                    }
+                    ui.horizontal(|ui| {
+                        if self.is_target(folder) {
+                            ui.add_enabled(false, egui::Button::new("✔").small())
+                                .on_disabled_hover_text("Already a target folder");
+                        } else if ui
+                            .small_button("+")
+                            .on_hover_text("Add as a target folder")
+                            .clicked()
+                        {
+                            add_target = Some(folder.clone());
+                        }
+
+                        let name = folder.file_name().unwrap_or_default().to_string_lossy();
+                        let button = egui::Button::new(format!("🗀  {name}")).frame(false);
+                        if ui.add(button).clicked() {
+                            open = Some(folder.clone());
+                        }
+                    });
                 }
             });
+        if let Some(folder) = add_target {
+            self.add_target_and_bind(folder);
+        }
         if let Some(folder) = open {
             self.load_photos_from(folder);
         }
