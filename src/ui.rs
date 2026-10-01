@@ -4,8 +4,10 @@
 use crate::app::{grid_columns, offset_to_reveal, visible_region, PhotoSorter, View, ZoomMode};
 use eframe::{egui, App};
 use egui::{Color32, Key, Rect, Sense, Stroke, StrokeKind, Vec2};
+use std::path::PathBuf;
 
 const GREEN: Color32 = Color32::from_rgb(120, 200, 120);
+const REVEAL_HINT: &str = "Show in the file explorer";
 
 impl App for PhotoSorter {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -173,6 +175,7 @@ impl PhotoSorter {
         let mut start_listening: Option<usize> = None;
         let mut remove: Option<usize> = None;
         let mut sort_into: Option<usize> = None;
+        let mut reveal: Option<PathBuf> = None;
 
         for (i, folder) in self.config.target_folders.iter().enumerate() {
             ui.horizontal(|ui| {
@@ -205,6 +208,10 @@ impl PhotoSorter {
                     sort_into = Some(i);
                 }
 
+                if ui.small_button("🗁").on_hover_text(REVEAL_HINT).clicked() {
+                    reveal = Some(folder.path.clone());
+                }
+
                 if ui.small_button("x").on_hover_text("Remove").clicked() {
                     remove = Some(i);
                 }
@@ -219,6 +226,9 @@ impl PhotoSorter {
         }
         if let Some(i) = sort_into {
             self.sort_into(i);
+        }
+        if let Some(path) = reveal {
+            self.reveal_folder(&path);
         }
 
         ui.add_space(4.0);
@@ -253,11 +263,18 @@ impl PhotoSorter {
         ui.add_space(18.0);
         ui.heading("Source");
         ui.separator();
-        if ui.button("Open source folder").clicked() {
-            if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                self.load_photos_from(path);
+        ui.horizontal(|ui| {
+            if ui.button("Open source folder").clicked() {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    self.load_photos_from(path);
+                }
             }
-        }
+            if let Some(folder) = self.config.source_folder.clone() {
+                if ui.small_button("🗁").on_hover_text(REVEAL_HINT).clicked() {
+                    self.reveal_folder(&folder);
+                }
+            }
+        });
         if let Some(folder) = &self.config.source_folder {
             ui.label(
                 egui::RichText::new(folder.display().to_string())

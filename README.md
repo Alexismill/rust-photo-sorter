@@ -17,7 +17,8 @@ Supported formats: JPEG, PNG, WebP, BMP, TIFF, GIF.
 4. Press the bound keys to sort.
 
 Clicking a target folder's name also moves the current photo there, and `x`
-removes the folder from the list.
+removes the folder from the list. `🗁`, next to a target folder or to **Open
+source folder**, shows that folder in the file explorer.
 
 ### Keys
 

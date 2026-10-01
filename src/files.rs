@@ -80,6 +80,22 @@ pub fn create_subfolder(parent: &Path, name: &str) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Opens `folder` in the system file manager. Only a failure to launch is
+/// reported: Explorer exits with an error code even when it worked.
+pub fn reveal_in_file_manager(folder: &Path) -> std::io::Result<()> {
+    let program = if cfg!(target_os = "windows") {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let mut child = std::process::Command::new(program).arg(folder).spawn()?;
+    // Reaped off the UI thread, so the app never freezes or leaves a zombie.
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+
 /// Moves a file. `fs::rename` fails across drives, hence the copy-then-delete
 /// fallback.
 pub fn move_file(source: &Path, destination: &Path) -> std::io::Result<()> {

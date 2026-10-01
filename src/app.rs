@@ -349,6 +349,14 @@ impl PhotoSorter {
         }
     }
 
+    pub fn reveal_folder(&mut self, folder: &Path) {
+        if !folder.is_dir() {
+            self.status = format!("Folder \"{}\" no longer exists.", name_of(folder));
+        } else if let Err(e) = files::reveal_in_file_manager(folder) {
+            self.status = format!("Could not open the file explorer: {e}");
+        }
+    }
+
     /// Binds `key` to folder `folder_idx`. Returns `false` if the key is
     /// reserved or already taken by another folder.
     pub fn assign_shortcut(&mut self, folder_idx: usize, key: Key) -> bool {
