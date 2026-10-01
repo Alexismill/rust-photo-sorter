@@ -292,12 +292,29 @@ impl PhotoSorter {
                 }
             }
         });
-        if let Some(folder) = &self.config.source_folder {
-            ui.label(
-                egui::RichText::new(folder.display().to_string())
-                    .small()
-                    .weak(),
-            );
+        // Breadcrumb: click any parent to jump straight up to it.
+        if let Some(folder) = self.config.source_folder.clone() {
+            let crumbs = crate::files::breadcrumb(&folder);
+            let mut jump: Option<PathBuf> = None;
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let last = crumbs.len().saturating_sub(1);
+                for (i, (name, path)) in crumbs.iter().enumerate() {
+                    if i == last {
+                        // The current folder: nothing to jump to.
+                        ui.label(egui::RichText::new(name).small().strong());
+                        break;
+                    }
+                    let crumb = egui::Button::new(egui::RichText::new(name).small()).frame(false);
+                    if ui.add(crumb).on_hover_text(path.display().to_string()).clicked() {
+                        jump = Some(path.clone());
+                    }
+                    ui.label(egui::RichText::new("›").small().weak());
+                }
+            });
+            if let Some(path) = jump {
+                self.load_photos_from(path);
+            }
         }
         if !self.photos.is_empty() {
             ui.label(format!(

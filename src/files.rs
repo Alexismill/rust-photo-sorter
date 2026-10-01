@@ -36,6 +36,33 @@ pub fn list_subfolders(folder: &Path) -> Vec<PathBuf> {
     folders
 }
 
+/// Each folder from the root down to `folder`, with the name to show for it:
+/// "D:\Photos\2024" gives "D:", "Photos", "2024".
+pub fn breadcrumb(folder: &Path) -> Vec<(String, PathBuf)> {
+    let mut crumbs: Vec<(String, PathBuf)> = folder
+        .ancestors()
+        .map(|path| {
+            let name = match path.file_name() {
+                Some(name) => name.to_string_lossy().into_owned(),
+                // The root has no name: show it as "D:" or "/".
+                None => {
+                    let root = path.to_string_lossy();
+                    let trimmed = root.trim_end_matches(['\\', '/']);
+                    if trimmed.is_empty() {
+                        root.into_owned()
+                    } else {
+                        trimmed.to_owned()
+                    }
+                }
+            };
+            (name, path.to_path_buf())
+        })
+        .filter(|(name, _)| !name.is_empty())
+        .collect();
+    crumbs.reverse();
+    crumbs
+}
+
 pub fn is_supported_image(path: &Path) -> bool {
     path.extension()
         .and_then(OsStr::to_str)
@@ -189,6 +216,20 @@ mod tests {
 
         // sorted by name, extensions case-insensitive, directories excluded
         assert_eq!(photos, vec!["a.PNG", "b.jpg", "c.jpeg"]);
+    }
+
+    #[test]
+    fn breadcrumb_goes_from_the_root_down_to_the_folder() {
+        let folder = std::env::temp_dir().join("Photos").join("2024");
+        let crumbs = breadcrumb(&folder);
+
+        let names: Vec<&str> = crumbs.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names[names.len() - 2..], ["Photos", "2024"]);
+        assert_eq!(crumbs.last().unwrap().1, folder);
+        // Starts at the root, shown without its trailing separator.
+        let (root_name, root) = &crumbs[0];
+        assert!(root.parent().is_none());
+        assert!(root_name == "/" || !root_name.ends_with(['\\', '/']));
     }
 
     #[test]
