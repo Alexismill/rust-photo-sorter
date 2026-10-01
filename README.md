@@ -24,7 +24,8 @@ The source folder's path is clickable: `D: › Photos › 2024` opens any of the
 folders in one click. Under it, `⬆ ..` opens the parent and the folders below
 it open a subfolder, to change the source without the dialog. Changing the
 source clears the undo history. `+` in front of a subfolder adds it to the
-target folders and waits for its key (`✔` when it already is one).
+target folders and waits for its key (`✔` when it already is one). Each
+subfolder shows how many photos it holds.
 
 `⟳` re-reads the source folder after changes made outside the app. It keeps
 the current photo, the selection and the undo history.

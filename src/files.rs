@@ -21,6 +21,19 @@ pub fn list_photos(folder: &Path) -> Vec<PathBuf> {
     photos
 }
 
+/// How many images `folder` holds, like `list_photos` but without building
+/// the list. Uses the type read along with each entry, so counting costs no
+/// extra disk access per file.
+pub fn count_photos(folder: &Path) -> usize {
+    std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
+        .filter(|entry| is_supported_image(&entry.path()))
+        .count()
+}
+
 /// Lists the folders directly inside `folder`, sorted by name regardless of
 /// case. Hidden ones (".git", ...) are left out.
 pub fn list_subfolders(folder: &Path) -> Vec<PathBuf> {
@@ -216,6 +229,7 @@ mod tests {
 
         // sorted by name, extensions case-insensitive, directories excluded
         assert_eq!(photos, vec!["a.PNG", "b.jpg", "c.jpeg"]);
+        assert_eq!(count_photos(&dir), 3);
     }
 
     #[test]

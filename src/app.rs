@@ -60,6 +60,13 @@ pub enum View {
     Grid,
 }
 
+/// A folder inside the source, as listed in the sidebar.
+pub struct Subfolder {
+    pub path: PathBuf,
+    /// Photos directly inside it, so you can see where sorting is left.
+    pub photos: usize,
+}
+
 /// A completed move, kept so it can be undone.
 pub struct MoveRecord {
     pub from: PathBuf,
@@ -75,7 +82,7 @@ pub struct PhotoSorter {
     pub current_index: usize,
     /// Folders inside the source folder, for quick navigation. Read on each
     /// folder change or with ⟳, not every frame.
-    pub subfolders: Vec<PathBuf>,
+    pub subfolders: Vec<Subfolder>,
     /// The folder after the source, offered once it has no photos left.
     pub next_folder: Option<PathBuf>,
 
@@ -213,10 +220,24 @@ impl PhotoSorter {
     /// creating a folder elsewhere.
     pub fn refresh_folders(&mut self) {
         self.subfolders = match &self.config.source_folder {
-            Some(source) => files::list_subfolders(source),
+            Some(source) => files::list_subfolders(source)
+                .into_iter()
+                .map(|path| Subfolder {
+                    photos: files::count_photos(&path),
+                    path,
+                })
+                .collect(),
             None => Vec::new(),
         };
         self.next_folder = self.sibling_folder(1);
+    }
+
+    /// Keeps a subfolder's count right when photos are sorted into it or
+    /// taken back, without re-reading the disk.
+    fn count_moved(&mut self, folder: &Path, added: isize) {
+        if let Some(subfolder) = self.subfolders.iter_mut().find(|s| s.path == folder) {
+            subfolder.photos = subfolder.photos.saturating_add_signed(added);
+        }
     }
 
     /// The folder `step` places away from the source among its siblings,
@@ -638,6 +659,7 @@ impl PhotoSorter {
                 index,
             });
         }
+        self.count_moved(&target_dir, batch.len() as isize);
         self.clamp_index();
         self.drop_stale_full_texture();
         self.scroll_to_current = true;
@@ -682,6 +704,9 @@ impl PhotoSorter {
         for record in batch.into_iter().rev() {
             match files::move_file(&record.to, &record.from) {
                 Ok(()) => {
+                    if let Some(folder) = record.to.parent() {
+                        self.count_moved(folder, -1);
+                    }
                     let index = record.index.min(self.photos.len());
                     self.photos.insert(index, record.from.clone());
                     self.current_index = index;
@@ -1071,7 +1096,7 @@ mod tests {
         let source = app.config.source_folder.clone().unwrap();
         std::fs::create_dir(source.join("Keep")).unwrap();
         app.refresh_folders();
-        let keep = app.subfolders[0].clone();
+        let keep = app.subfolders[0].path.clone();
 
         assert!(app.add_target_and_bind(keep.clone()));
         assert!(app.is_target(&keep));
@@ -1081,6 +1106,22 @@ mod tests {
         assert!(!app.add_target_and_bind(keep));
         assert_eq!(app.config.target_folders.len(), 2);
         assert_eq!(app.listening_for_key, None);
+    }
+
+    #[test]
+    fn subfolder_counts_follow_sorting_and_undo() {
+        let (mut app, _) = sorter_with_photos("subfolder_counts");
+        let source = app.config.source_folder.clone().unwrap();
+        std::fs::create_dir(source.join("Keep")).unwrap();
+        std::fs::write(source.join("Keep").join("old.jpg"), "old").unwrap();
+        app.refresh_folders();
+        assert_eq!(app.subfolders[0].photos, 1);
+
+        app.add_target_folder(source.join("Keep"));
+        app.sort_into(1);
+        assert_eq!(app.subfolders[0].photos, 2);
+        app.undo();
+        assert_eq!(app.subfolders[0].photos, 1);
     }
 
     #[test]

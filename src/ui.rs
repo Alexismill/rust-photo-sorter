@@ -345,7 +345,8 @@ impl PhotoSorter {
             .id_salt("subfolders")
             .max_height(160.0)
             .show(ui, |ui| {
-                for folder in &self.subfolders {
+                for subfolder in &self.subfolders {
+                    let folder = &subfolder.path;
                     ui.horizontal(|ui| {
                         if self.is_target(folder) {
                             ui.add_enabled(false, egui::Button::new("✔").small())
@@ -359,7 +360,8 @@ impl PhotoSorter {
                         }
 
                         let name = folder.file_name().unwrap_or_default().to_string_lossy();
-                        let button = egui::Button::new(format!("🗀  {name}")).frame(false);
+                        let text = format!("🗀  {name}  ({})", subfolder.photos);
+                        let button = egui::Button::new(text).frame(false);
                         if ui.add(button).clicked() {
                             open = Some(folder.clone());
                         }
