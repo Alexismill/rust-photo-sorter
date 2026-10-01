@@ -49,6 +49,7 @@ offers it with a button. Target folders are skipped.
 | `Ctrl+Z` | Undo the last move |
 | `Ctrl+N` | Type the name of a new folder in the source folder |
 | `Alt+←` / `Alt+→` | Previous / next folder beside the source folder |
+| `Alt+↑` | Parent of the source folder |
 
 ### Contact sheet
 

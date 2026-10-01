@@ -13,6 +13,7 @@ project follows [Semantic Versioning](https://semver.org/).
   reload photos edited in place.
 - Drop a folder on the window to open it as the source folder, or a photo to
   open its folder on that photo.
+- `Alt+↑` opens the parent of the source folder.
 
 ### Fixed
 

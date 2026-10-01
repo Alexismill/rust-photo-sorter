@@ -288,6 +288,16 @@ impl PhotoSorter {
         self.status = format!("{name}: {}", self.status);
     }
 
+    /// `Alt+Up`: opens the folder holding the source folder.
+    pub fn open_parent(&mut self) {
+        let parent = self.config.source_folder.as_ref().and_then(|f| f.parent());
+        let Some(parent) = parent.map(Path::to_path_buf) else {
+            self.status = "No parent folder.".into();
+            return;
+        };
+        self.load_photos_from(parent);
+    }
+
     pub fn current_photo(&self) -> Option<&PathBuf> {
         self.photos.get(self.current_index)
     }
@@ -1145,6 +1155,14 @@ mod tests {
         app.open_sibling(-1);
         assert_eq!(app.config.source_folder.as_ref(), Some(&other));
         assert_eq!(app.next_folder.as_ref(), Some(&source));
+    }
+
+    #[test]
+    fn alt_up_opens_the_parent_folder() {
+        let (mut app, _) = sorter_with_photos("parent");
+        let source = app.config.source_folder.clone().unwrap();
+        app.open_parent();
+        assert_eq!(app.config.source_folder.as_deref(), source.parent());
     }
 
     #[test]

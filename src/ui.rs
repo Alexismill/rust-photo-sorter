@@ -104,6 +104,10 @@ impl PhotoSorter {
             self.open_sibling(-1);
             return;
         }
+        if ctx.input(|i| i.modifiers.alt && i.key_pressed(Key::ArrowUp)) {
+            self.open_parent();
+            return;
+        }
 
         if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::Z)) {
             self.undo();
@@ -370,7 +374,8 @@ impl PhotoSorter {
         let parent = self.config.source_folder.as_ref().and_then(|f| f.parent());
         if let Some(parent) = parent {
             let up = egui::Button::new("⬆  ..").frame(false);
-            if ui.add(up).on_hover_text(parent.display().to_string()).clicked() {
+            let hint = format!("{}  (Alt+Up)", parent.display());
+            if ui.add(up).on_hover_text(hint).clicked() {
                 open = Some(parent.to_path_buf());
             }
         }
@@ -439,6 +444,7 @@ impl PhotoSorter {
                 }
                 "Left / Right arrows: navigate\n\
                  Alt+Left / Right: other folder\n\
+                 Alt+Up: parent folder\n\
                  Bound key: sort\n\
                  Wheel: zoom, drag: pan\n\
                  Space: fit <-> 1:1"
@@ -450,7 +456,8 @@ impl PhotoSorter {
                  Ctrl+A: select all\n\
                  Bound key: sort the selection\n\
                  Double-click: open\n\
-                 Alt+Left / Right: other folder"
+                 Alt+Left / Right: other folder\n\
+                 Alt+Up: parent folder"
             }
         };
 
