@@ -4,8 +4,10 @@
 use crate::app::{grid_columns, offset_to_reveal, visible_region, PhotoSorter, View, ZoomMode};
 use eframe::{egui, App};
 use egui::{Color32, Key, Rect, Sense, Stroke, StrokeKind, Vec2};
+use std::path::PathBuf;
 
 const GREEN: Color32 = Color32::from_rgb(120, 200, 120);
+const REVEAL_HINT: &str = "Show in the file explorer";
 
 impl App for PhotoSorter {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -51,6 +53,25 @@ impl PhotoSorter {
     // ── Keyboard ────────────────────────────────────────────────────────────
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        // Typing a folder name must not sort photos.
+        if ctx.text_edit_focused() {
+            return;
+        }
+
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::N)) {
+            self.focus_new_folder = true;
+        }
+
+        // Before the plain arrows below, which would fire as well.
+        if ctx.input(|i| i.modifiers.alt && i.key_pressed(Key::ArrowRight)) {
+            self.open_sibling(1);
+            return;
+        }
+        if ctx.input(|i| i.modifiers.alt && i.key_pressed(Key::ArrowLeft)) {
+            self.open_sibling(-1);
+            return;
+        }
+
         if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::Z)) {
             self.undo();
             return;
@@ -164,6 +185,7 @@ impl PhotoSorter {
         let mut start_listening: Option<usize> = None;
         let mut remove: Option<usize> = None;
         let mut sort_into: Option<usize> = None;
+        let mut reveal: Option<PathBuf> = None;
 
         for (i, folder) in self.config.target_folders.iter().enumerate() {
             ui.horizontal(|ui| {
@@ -196,6 +218,10 @@ impl PhotoSorter {
                     sort_into = Some(i);
                 }
 
+                if ui.small_button("🗁").on_hover_text(REVEAL_HINT).clicked() {
+                    reveal = Some(folder.path.clone());
+                }
+
                 if ui.small_button("x").on_hover_text("Remove").clicked() {
                     remove = Some(i);
                 }
@@ -211,6 +237,9 @@ impl PhotoSorter {
         if let Some(i) = sort_into {
             self.sort_into(i);
         }
+        if let Some(path) = reveal {
+            self.reveal_folder(&path);
+        }
 
         ui.add_space(4.0);
         if ui.button("+ Add target folder").clicked() {
@@ -219,20 +248,73 @@ impl PhotoSorter {
             }
         }
 
+        // Quicker than the dialog: type a name, Enter, then press its key.
+        let has_source = self.config.source_folder.is_some();
+        ui.add_enabled_ui(has_source, |ui| {
+            ui.horizontal(|ui| {
+                let field = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.new_folder_name)
+                            .hint_text("New folder (Ctrl+N)")
+                            .desired_width(ui.available_width() - 60.0),
+                    )
+                    .on_hover_text("Created inside the source folder");
+                if std::mem::take(&mut self.focus_new_folder) {
+                    field.request_focus();
+                }
+                let entered = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                let create = ui.button("Create").clicked() || entered;
+                if create && !self.new_folder_name.trim().is_empty() {
+                    self.create_target_folder();
+                }
+            });
+        });
+
         ui.add_space(18.0);
         ui.heading("Source");
         ui.separator();
-        if ui.button("Open source folder").clicked() {
-            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+        ui.horizontal(|ui| {
+            if ui.button("Open source folder").clicked() {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    self.load_photos_from(path);
+                }
+            }
+            if let Some(folder) = self.config.source_folder.clone() {
+                if ui.small_button("🗁").on_hover_text(REVEAL_HINT).clicked() {
+                    self.reveal_folder(&folder);
+                }
+                if ui
+                    .small_button("⟳")
+                    .on_hover_text("Refresh the photos and subfolders")
+                    .clicked()
+                {
+                    self.refresh_source();
+                }
+            }
+        });
+        // Breadcrumb: click any parent to jump straight up to it.
+        if let Some(folder) = self.config.source_folder.clone() {
+            let crumbs = crate::files::breadcrumb(&folder);
+            let mut jump: Option<PathBuf> = None;
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let last = crumbs.len().saturating_sub(1);
+                for (i, (name, path)) in crumbs.iter().enumerate() {
+                    if i == last {
+                        // The current folder: nothing to jump to.
+                        ui.label(egui::RichText::new(name).small().strong());
+                        break;
+                    }
+                    let crumb = egui::Button::new(egui::RichText::new(name).small()).frame(false);
+                    if ui.add(crumb).on_hover_text(path.display().to_string()).clicked() {
+                        jump = Some(path.clone());
+                    }
+                    ui.label(egui::RichText::new("›").small().weak());
+                }
+            });
+            if let Some(path) = jump {
                 self.load_photos_from(path);
             }
-        }
-        if let Some(folder) = &self.config.source_folder {
-            ui.label(
-                egui::RichText::new(folder.display().to_string())
-                    .small()
-                    .weak(),
-            );
         }
         if !self.photos.is_empty() {
             ui.label(format!(
@@ -246,6 +328,51 @@ impl PhotoSorter {
                         .small(),
                 );
             }
+        }
+
+        // Quick navigation: up to the parent, or down into a subfolder. `+`
+        // makes a subfolder a target instead.
+        let mut open: Option<PathBuf> = None;
+        let mut add_target: Option<PathBuf> = None;
+        let parent = self.config.source_folder.as_ref().and_then(|f| f.parent());
+        if let Some(parent) = parent {
+            let up = egui::Button::new("⬆  ..").frame(false);
+            if ui.add(up).on_hover_text(parent.display().to_string()).clicked() {
+                open = Some(parent.to_path_buf());
+            }
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("subfolders")
+            .max_height(160.0)
+            .show(ui, |ui| {
+                for subfolder in &self.subfolders {
+                    let folder = &subfolder.path;
+                    ui.horizontal(|ui| {
+                        if self.is_target(folder) {
+                            ui.add_enabled(false, egui::Button::new("✔").small())
+                                .on_disabled_hover_text("Already a target folder");
+                        } else if ui
+                            .small_button("+")
+                            .on_hover_text("Add as a target folder")
+                            .clicked()
+                        {
+                            add_target = Some(folder.clone());
+                        }
+
+                        let name = folder.file_name().unwrap_or_default().to_string_lossy();
+                        let text = format!("🗀  {name}  ({})", subfolder.photos);
+                        let button = egui::Button::new(text).frame(false);
+                        if ui.add(button).clicked() {
+                            open = Some(folder.clone());
+                        }
+                    });
+                }
+            });
+        if let Some(folder) = add_target {
+            self.add_target_and_bind(folder);
+        }
+        if let Some(folder) = open {
+            self.load_photos_from(folder);
         }
 
         ui.add_space(18.0);
@@ -278,6 +405,7 @@ impl PhotoSorter {
                     self.toggle_zoom();
                 }
                 "Left / Right arrows: navigate\n\
+                 Alt+Left / Right: other folder\n\
                  Bound key: sort\n\
                  Wheel: zoom, drag: pan\n\
                  Space: fit <-> 1:1"
@@ -288,7 +416,8 @@ impl PhotoSorter {
                  Space: select current, Esc: clear\n\
                  Ctrl+A: select all\n\
                  Bound key: sort the selection\n\
-                 Double-click: open"
+                 Double-click: open\n\
+                 Alt+Left / Right: other folder"
             }
         };
 
@@ -298,11 +427,32 @@ impl PhotoSorter {
 
     // ── Photo view ──────────────────────────────────────────────────────────
 
-    fn photo_panel(&mut self, ui: &mut egui::Ui) {
-        if self.photos.is_empty() {
+    /// Shown instead of the photos when there are none. Once a folder is
+    /// done, offers the next one.
+    fn empty_panel(&mut self, ui: &mut egui::Ui) {
+        if self.config.source_folder.is_none() {
             ui.centered_and_justified(|ui| {
                 ui.label("Open a source folder to get started.");
             });
+            return;
+        }
+        ui.vertical_centered(|ui| {
+            ui.add_space(ui.available_height() / 3.0);
+            ui.label("No photos in this folder.");
+            if let Some(next) = self.next_folder.clone() {
+                ui.add_space(8.0);
+                let name = next.file_name().unwrap_or_default().to_string_lossy();
+                let label = format!("Next folder: {name}  (Alt+Right)");
+                if ui.button(label).on_hover_text(next.display().to_string()).clicked() {
+                    self.open_sibling(1);
+                }
+            }
+        });
+    }
+
+    fn photo_panel(&mut self, ui: &mut egui::Ui) {
+        if self.photos.is_empty() {
+            self.empty_panel(ui);
             return;
         }
 
@@ -402,9 +552,7 @@ impl PhotoSorter {
 
     fn grid_panel(&mut self, ui: &mut egui::Ui) {
         if self.photos.is_empty() {
-            ui.centered_and_justified(|ui| {
-                ui.label("Open a source folder to get started.");
-            });
+            self.empty_panel(ui);
             return;
         }
 

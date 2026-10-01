@@ -21,6 +21,61 @@ pub fn list_photos(folder: &Path) -> Vec<PathBuf> {
     photos
 }
 
+/// How many images `folder` holds, like `list_photos` but without building
+/// the list. Uses the type read along with each entry, so counting costs no
+/// extra disk access per file.
+pub fn count_photos(folder: &Path) -> usize {
+    std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
+        .filter(|entry| is_supported_image(&entry.path()))
+        .count()
+}
+
+/// Lists the folders directly inside `folder`, sorted by name regardless of
+/// case. Hidden ones (".git", ...) are left out.
+pub fn list_subfolders(folder: &Path) -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|p| p.is_dir())
+        .filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')))
+        .collect();
+    folders.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
+    folders
+}
+
+/// Each folder from the root down to `folder`, with the name to show for it:
+/// "D:\Photos\2024" gives "D:", "Photos", "2024".
+pub fn breadcrumb(folder: &Path) -> Vec<(String, PathBuf)> {
+    let mut crumbs: Vec<(String, PathBuf)> = folder
+        .ancestors()
+        .map(|path| {
+            let name = match path.file_name() {
+                Some(name) => name.to_string_lossy().into_owned(),
+                // The root has no name: show it as "D:" or "/".
+                None => {
+                    let root = path.to_string_lossy();
+                    let trimmed = root.trim_end_matches(['\\', '/']);
+                    if trimmed.is_empty() {
+                        root.into_owned()
+                    } else {
+                        trimmed.to_owned()
+                    }
+                }
+            };
+            (name, path.to_path_buf())
+        })
+        .filter(|(name, _)| !name.is_empty())
+        .collect();
+    crumbs.reverse();
+    crumbs
+}
+
 pub fn is_supported_image(path: &Path) -> bool {
     path.extension()
         .and_then(OsStr::to_str)
@@ -55,6 +110,45 @@ pub fn unique_destination(dir: &Path, file_name: &OsStr) -> PathBuf {
         }
     }
     candidate
+}
+
+/// Creates `parent/name` and returns its path. `name` must be a plain folder
+/// name, not a path. An existing folder is fine and returned as is.
+pub fn create_subfolder(parent: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let name = name.trim();
+    let mut components = Path::new(name).components();
+    let is_plain_name = matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    );
+    if !is_plain_name {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid folder name",
+        ));
+    }
+
+    let path = parent.join(name);
+    if !path.is_dir() {
+        std::fs::create_dir(&path)?;
+    }
+    Ok(path)
+}
+
+/// Opens `folder` in the system file manager. Only a failure to launch is
+/// reported: Explorer exits with an error code even when it worked.
+pub fn reveal_in_file_manager(folder: &Path) -> std::io::Result<()> {
+    let program = if cfg!(target_os = "windows") {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let mut child = std::process::Command::new(program).arg(folder).spawn()?;
+    // Reaped off the UI thread, so the app never freezes or leaves a zombie.
+    std::thread::spawn(move || child.wait());
+    Ok(())
 }
 
 /// Moves a file. `fs::rename` fails across drives, hence the copy-then-delete
@@ -135,5 +229,50 @@ mod tests {
 
         // sorted by name, extensions case-insensitive, directories excluded
         assert_eq!(photos, vec!["a.PNG", "b.jpg", "c.jpeg"]);
+        assert_eq!(count_photos(&dir), 3);
+    }
+
+    #[test]
+    fn breadcrumb_goes_from_the_root_down_to_the_folder() {
+        let folder = std::env::temp_dir().join("Photos").join("2024");
+        let crumbs = breadcrumb(&folder);
+
+        let names: Vec<&str> = crumbs.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names[names.len() - 2..], ["Photos", "2024"]);
+        assert_eq!(crumbs.last().unwrap().1, folder);
+        // Starts at the root, shown without its trailing separator.
+        let (root_name, root) = &crumbs[0];
+        assert!(root.parent().is_none());
+        assert!(root_name == "/" || !root_name.ends_with(['\\', '/']));
+    }
+
+    #[test]
+    fn lists_visible_subfolders_only() {
+        let dir = temp_dir("subfolders");
+        for name in ["b", "A", "c", ".hidden"] {
+            std::fs::create_dir(dir.join(name)).unwrap();
+        }
+        std::fs::write(dir.join("photo.jpg"), b"x").unwrap();
+
+        let names: Vec<String> = list_subfolders(&dir)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["A", "b", "c"]);
+    }
+
+    #[test]
+    fn creates_a_subfolder_and_rejects_paths() {
+        let dir = temp_dir("subfolder");
+
+        let created = create_subfolder(&dir, "  Keep ").unwrap();
+        assert_eq!(created, dir.join("Keep"));
+        assert!(created.is_dir());
+        // Asking again for the same name just returns it.
+        assert_eq!(create_subfolder(&dir, "Keep").unwrap(), created);
+
+        for bad in ["", "   ", "..", "a/b", "../escape"] {
+            assert!(create_subfolder(&dir, bad).is_err(), "{bad:?} was accepted");
+        }
     }
 }

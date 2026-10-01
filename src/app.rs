@@ -60,6 +60,13 @@ pub enum View {
     Grid,
 }
 
+/// A folder inside the source, as listed in the sidebar.
+pub struct Subfolder {
+    pub path: PathBuf,
+    /// Photos directly inside it, so you can see where sorting is left.
+    pub photos: usize,
+}
+
 /// A completed move, kept so it can be undone.
 pub struct MoveRecord {
     pub from: PathBuf,
@@ -73,6 +80,11 @@ pub struct PhotoSorter {
 
     pub photos: Vec<PathBuf>,
     pub current_index: usize,
+    /// Folders inside the source folder, for quick navigation. Read on each
+    /// folder change or with ⟳, not every frame.
+    pub subfolders: Vec<Subfolder>,
+    /// The folder after the source, offered once it has no photos left.
+    pub next_folder: Option<PathBuf>,
 
     /// Downscaled images for everyday viewing, one per nearby photo.
     pub textures: HashMap<PathBuf, Preview>,
@@ -105,6 +117,10 @@ pub struct PhotoSorter {
 
     /// When `Some(i)`, we are waiting for a key to bind to folder `i`.
     pub listening_for_key: Option<usize>,
+    /// Name typed in the sidebar for a new folder inside the source folder.
+    pub new_folder_name: String,
+    /// Set by `Ctrl+N`, so the sidebar puts the cursor in that field.
+    pub focus_new_folder: bool,
     /// One entry per sort action, so a batch is undone in a single step.
     pub history: Vec<Vec<MoveRecord>>,
     pub status: String,
@@ -125,6 +141,8 @@ impl PhotoSorter {
             config,
             photos: Vec::new(),
             current_index: 0,
+            subfolders: Vec::new(),
+            next_folder: None,
             textures: HashMap::new(),
             full_texture: None,
             loader: Loader::new(ctx),
@@ -138,6 +156,8 @@ impl PhotoSorter {
             scroll_to_current: false,
             grid_viewport: (0.0, 0.0),
             listening_for_key: None,
+            new_folder_name: String::new(),
+            focus_new_folder: false,
             history: Vec::new(),
             status: String::new(),
         };
@@ -155,6 +175,7 @@ impl PhotoSorter {
     pub fn load_photos_from(&mut self, folder: PathBuf) {
         self.photos = files::list_photos(&folder);
         self.current_index = 0;
+        self.scroll_to_current = true;
         self.textures.clear();
         self.thumbnails.clear();
         self.unreadable.clear();
@@ -164,12 +185,85 @@ impl PhotoSorter {
         self.reset_zoom();
         self.loader.forget_pending();
         self.history.clear();
-        self.status = match self.photos.len() {
-            0 => "No images in this folder.".to_string(),
-            1 => "1 photo found.".to_string(),
-            n => format!("{n} photos found."),
-        };
+        self.status = photos_found(self.photos.len());
         self.config.source_folder = Some(folder);
+        self.refresh_folders();
+    }
+
+    /// `⟳`: re-reads the source folder after changes made outside the app.
+    /// Unlike `load_photos_from`, keeps the current photo, the selection and
+    /// the undo history.
+    pub fn refresh_source(&mut self) {
+        let Some(source) = self.config.source_folder.clone() else { return };
+        let current = self.current_photo().cloned();
+
+        self.photos = files::list_photos(&source);
+        let present: HashSet<&PathBuf> = self.photos.iter().collect();
+        self.selection.retain(|p| present.contains(p));
+        if let Some(index) = current.and_then(|c| self.photos.iter().position(|p| *p == c)) {
+            self.current_index = index;
+        }
+        self.clamp_index();
+        self.scroll_to_current = true;
+
+        // A file may have been edited in place: decode everything again.
+        self.textures.clear();
+        self.thumbnails.clear();
+        self.unreadable.clear();
+        self.full_texture = None;
+
+        self.refresh_folders();
+        self.status = format!("Refreshed. {}", photos_found(self.photos.len()));
+    }
+
+    /// Re-reads the source's subfolders and its next sibling, e.g. after
+    /// creating a folder elsewhere.
+    pub fn refresh_folders(&mut self) {
+        self.subfolders = match &self.config.source_folder {
+            Some(source) => files::list_subfolders(source)
+                .into_iter()
+                .map(|path| Subfolder {
+                    photos: files::count_photos(&path),
+                    path,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        self.next_folder = self.sibling_folder(1);
+    }
+
+    /// Keeps a subfolder's count right when photos are sorted into it or
+    /// taken back, without re-reading the disk.
+    fn count_moved(&mut self, folder: &Path, added: isize) {
+        if let Some(subfolder) = self.subfolders.iter_mut().find(|s| s.path == folder) {
+            subfolder.photos = subfolder.photos.saturating_add_signed(added);
+        }
+    }
+
+    /// The folder `step` places away from the source among its siblings,
+    /// skipping target folders: walks through 100CANON, 101CANON, ...
+    pub fn sibling_folder(&self, step: isize) -> Option<PathBuf> {
+        let source = self.config.source_folder.as_ref()?;
+        let siblings: Vec<PathBuf> = files::list_subfolders(source.parent()?)
+            .into_iter()
+            .filter(|f| f == source || !self.is_target(f))
+            .collect();
+        let index = siblings.iter().position(|f| f == source)?;
+        siblings.get(index.checked_add_signed(step)?).cloned()
+    }
+
+    /// `Alt+Left` / `Alt+Right`, and the button shown once a folder is empty.
+    pub fn open_sibling(&mut self, step: isize) {
+        let Some(folder) = self.sibling_folder(step) else {
+            self.status = match step {
+                1 => "No next folder.".into(),
+                _ => "No previous folder.".into(),
+            };
+            return;
+        };
+        let name = name_of(&folder);
+        self.load_photos_from(folder);
+        self.status = format!("{name}: {}", self.status);
     }
 
     pub fn current_photo(&self) -> Option<&PathBuf> {
@@ -298,23 +392,75 @@ impl PhotoSorter {
 
     // ── Target folders ──────────────────────────────────────────────────────
 
-    pub fn add_target_folder(&mut self, path: PathBuf) {
-        if self.config.target_folders.iter().any(|f| f.path == path) {
+    /// Returns `false` if the folder was refused.
+    pub fn add_target_folder(&mut self, path: PathBuf) -> bool {
+        if self.is_target(&path) {
             self.status = "That folder is already in the list.".into();
+            false
         } else if Some(&path) == self.config.source_folder.as_ref() {
             self.status = "The target folder cannot be the source folder.".into();
+            false
         } else {
             self.config.target_folders.push(TargetFolder::new(path));
+            // Targets are skipped when walking through sibling folders.
+            self.next_folder = self.sibling_folder(1);
+            true
         }
+    }
+
+    /// Creates the folder typed in the sidebar inside the source folder, adds
+    /// it as a target and waits for its key.
+    pub fn create_target_folder(&mut self) {
+        let Some(source) = self.config.source_folder.clone() else {
+            self.status = "Open a source folder first.".into();
+            return;
+        };
+        let path = match files::create_subfolder(&source, &self.new_folder_name) {
+            Ok(path) => path,
+            Err(e) => {
+                self.status = format!("Could not create the folder: {e}");
+                return;
+            }
+        };
+        self.refresh_folders();
+        if self.add_target_and_bind(path) {
+            self.new_folder_name.clear();
+        }
+    }
+
+    /// Adds a target and waits for its key at once: the quick paths from the
+    /// sidebar. Returns `false` if the folder was refused.
+    pub fn add_target_and_bind(&mut self, path: PathBuf) -> bool {
+        if !self.add_target_folder(path) {
+            return false;
+        }
+        let index = self.config.target_folders.len() - 1;
+        let name = self.config.target_folders[index].display_name();
+        self.status = format!("\"{name}\" added.");
+        self.listening_for_key = Some(index);
+        true
+    }
+
+    pub fn is_target(&self, path: &Path) -> bool {
+        self.config.target_folders.iter().any(|f| f.path == path)
     }
 
     pub fn remove_target_folder(&mut self, index: usize) {
         if index < self.config.target_folders.len() {
             self.config.target_folders.remove(index);
+            self.next_folder = self.sibling_folder(1);
         }
         // Stop waiting for a key if that folder was the one being bound.
         if self.listening_for_key == Some(index) {
             self.listening_for_key = None;
+        }
+    }
+
+    pub fn reveal_folder(&mut self, folder: &Path) {
+        if !folder.is_dir() {
+            self.status = format!("Folder \"{}\" no longer exists.", name_of(folder));
+        } else if let Err(e) = files::reveal_in_file_manager(folder) {
+            self.status = format!("Could not open the file explorer: {e}");
         }
     }
 
@@ -472,6 +618,11 @@ impl PhotoSorter {
             self.status = format!("Folder \"{label}\" no longer exists.");
             return;
         }
+        // Possible since the source can be changed to one of the targets.
+        if Some(&target_dir) == self.config.source_folder.as_ref() {
+            self.status = format!("\"{label}\" is the source folder.");
+            return;
+        }
 
         let mut batch = Vec::new();
         let mut renamed = Vec::new();
@@ -508,6 +659,7 @@ impl PhotoSorter {
                 index,
             });
         }
+        self.count_moved(&target_dir, batch.len() as isize);
         self.clamp_index();
         self.drop_stale_full_texture();
         self.scroll_to_current = true;
@@ -552,6 +704,9 @@ impl PhotoSorter {
         for record in batch.into_iter().rev() {
             match files::move_file(&record.to, &record.from) {
                 Ok(()) => {
+                    if let Some(folder) = record.to.parent() {
+                        self.count_moved(folder, -1);
+                    }
                     let index = record.index.min(self.photos.len());
                     self.photos.insert(index, record.from.clone());
                     self.current_index = index;
@@ -656,6 +811,14 @@ impl PhotoSorter {
                 }
             }
         }
+    }
+}
+
+fn photos_found(count: usize) -> String {
+    match count {
+        0 => "No images in this folder.".to_string(),
+        1 => "1 photo found.".to_string(),
+        n => format!("{n} photos found."),
     }
 }
 
@@ -895,6 +1058,100 @@ mod tests {
         assert_eq!(order, ["a", "b", "c", "d", "e"]);
         assert!(app.history.is_empty());
         assert_eq!(stems(&app.selection), ["b", "d"]);
+    }
+
+    #[test]
+    fn a_new_folder_is_created_in_the_source_and_awaits_its_key() {
+        let (mut app, _) = sorter_with_photos("new_folder");
+        let source = app.config.source_folder.clone().unwrap();
+
+        app.new_folder_name = "Keep".into();
+        app.create_target_folder();
+        assert!(source.join("Keep").is_dir());
+        assert_eq!(app.config.target_folders[1].path, source.join("Keep"));
+        assert_eq!(app.listening_for_key, Some(1));
+        assert!(app.new_folder_name.is_empty());
+        // The new folder is not a photo.
+        assert_eq!(app.photos.len(), 5);
+    }
+
+    #[test]
+    fn sibling_navigation_skips_target_folders() {
+        let (mut app, _) = sorter_with_photos("siblings");
+        let source = app.config.source_folder.clone().unwrap();
+        let other = source.parent().unwrap().join("other");
+        std::fs::create_dir(&other).unwrap();
+
+        // Siblings: other, source, target. The last one is a target folder.
+        app.open_sibling(1);
+        assert_eq!(app.config.source_folder.as_ref(), Some(&source));
+        app.open_sibling(-1);
+        assert_eq!(app.config.source_folder.as_ref(), Some(&other));
+        assert_eq!(app.next_folder.as_ref(), Some(&source));
+    }
+
+    #[test]
+    fn a_subfolder_becomes_a_target_once() {
+        let (mut app, _) = sorter_with_photos("subfolder_target");
+        let source = app.config.source_folder.clone().unwrap();
+        std::fs::create_dir(source.join("Keep")).unwrap();
+        app.refresh_folders();
+        let keep = app.subfolders[0].path.clone();
+
+        assert!(app.add_target_and_bind(keep.clone()));
+        assert!(app.is_target(&keep));
+        assert_eq!(app.listening_for_key, Some(1));
+
+        app.listening_for_key = None;
+        assert!(!app.add_target_and_bind(keep));
+        assert_eq!(app.config.target_folders.len(), 2);
+        assert_eq!(app.listening_for_key, None);
+    }
+
+    #[test]
+    fn subfolder_counts_follow_sorting_and_undo() {
+        let (mut app, _) = sorter_with_photos("subfolder_counts");
+        let source = app.config.source_folder.clone().unwrap();
+        std::fs::create_dir(source.join("Keep")).unwrap();
+        std::fs::write(source.join("Keep").join("old.jpg"), "old").unwrap();
+        app.refresh_folders();
+        assert_eq!(app.subfolders[0].photos, 1);
+
+        app.add_target_folder(source.join("Keep"));
+        app.sort_into(1);
+        assert_eq!(app.subfolders[0].photos, 2);
+        app.undo();
+        assert_eq!(app.subfolders[0].photos, 1);
+    }
+
+    #[test]
+    fn refreshing_picks_up_outside_changes_and_keeps_the_context() {
+        let (mut app, _) = sorter_with_photos("refresh");
+        let source = app.config.source_folder.clone().unwrap();
+        app.view = View::Grid;
+        app.click_photo(1, false, false); // select b
+        app.current_index = 3; // on d
+        app.sort_into(0); // b moved: undo history not empty
+        app.click_photo(3, false, false); // select e
+
+        std::fs::remove_file(source.join("a.jpg")).unwrap();
+        std::fs::write(source.join("f.jpg"), "f").unwrap();
+        app.refresh_source();
+
+        assert_eq!(stems(&app.photos), ["c", "d", "e", "f"]);
+        assert_eq!(stems(app.current_photo()), ["e"]);
+        assert_eq!(stems(&app.selection), ["e"]);
+        assert_eq!(app.history.len(), 1);
+    }
+
+    #[test]
+    fn a_target_opened_as_source_cannot_be_sorted_into() {
+        let (mut app, target) = sorter_with_photos("target_as_source");
+        std::fs::write(target.join("z.jpg"), "z").unwrap();
+        app.load_photos_from(target.clone());
+        app.sort_into(0);
+        assert_eq!(files_in(&target), ["z"]);
+        assert_eq!(stems(&app.photos), ["z"]);
     }
 
     #[test]

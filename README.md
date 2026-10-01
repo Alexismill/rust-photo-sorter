@@ -9,13 +9,29 @@ Supported formats: JPEG, PNG, WebP, BMP, TIFF, GIF.
 ## Usage
 
 1. **Open source folder**: the folder holding the photos to sort.
-2. **+ Add target folder**: once per destination.
+2. **+ Add target folder**: once per destination. Or type a name in the
+   **New folder** field (`Ctrl+N`) and press `Enter`: the folder is created
+   inside the source folder, added, and waits for its key.
 3. Click the `--` button next to a target folder, then press the key to bind
    to it.
 4. Press the bound keys to sort.
 
 Clicking a target folder's name also moves the current photo there, and `x`
-removes the folder from the list.
+removes the folder from the list. `🗁`, next to a target folder or to **Open
+source folder**, shows that folder in the file explorer.
+
+The source folder's path is clickable: `D: › Photos › 2024` opens any of these
+folders in one click. Under it, `⬆ ..` opens the parent and the folders below
+it open a subfolder, to change the source without the dialog. Changing the
+source clears the undo history. `+` in front of a subfolder adds it to the
+target folders and waits for its key (`✔` when it already is one). Each
+subfolder shows how many photos it holds.
+
+`⟳` re-reads the source folder after changes made outside the app. It keeps
+the current photo, the selection and the undo history.
+
+To sort a series of folders, `Alt+→` opens the next one, and an emptied folder
+offers it with a button. Target folders are skipped.
 
 ### Keys
 
@@ -28,6 +44,8 @@ removes the folder from the list.
 | `Space` | Toggle between fit-to-window and 1:1 |
 | `Esc` | Leave zoom, or cancel a key binding |
 | `Ctrl+Z` | Undo the last move |
+| `Ctrl+N` | Type the name of a new folder in the source folder |
+| `Alt+←` / `Alt+→` | Previous / next folder beside the source folder |
 
 ### Contact sheet
 
