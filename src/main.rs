@@ -8,11 +8,13 @@
 //!   files.rs   — listing, unique names, moving (no UI dependency)
 //!   loader.rs  — image decoding on background threads
 //!   app.rs     — state and sorting logic
+//!   folders.rs — source folder browsing and the target folder list
 //!   ui.rs      — egui rendering
 
 mod app;
 mod config;
 mod files;
+mod folders;
 mod loader;
 mod ui;
 
