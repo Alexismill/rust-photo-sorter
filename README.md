@@ -24,6 +24,9 @@ Under the source folder, `⬆ ..` opens its parent and the folders below it
 open a subfolder, to change the source without the dialog. Changing the
 source clears the undo history.
 
+`⟳` re-reads the source folder after changes made outside the app. It keeps
+the current photo, the selection and the undo history.
+
 ### Keys
 
 | Key | Action |

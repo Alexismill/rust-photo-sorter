@@ -73,8 +73,8 @@ pub struct PhotoSorter {
 
     pub photos: Vec<PathBuf>,
     pub current_index: usize,
-    /// Folders inside the source folder, for quick navigation. Read once per
-    /// folder change, not every frame.
+    /// Folders inside the source folder, for quick navigation. Read on each
+    /// folder change or with ⟳, not every frame.
     pub subfolders: Vec<PathBuf>,
 
     /// Downscaled images for everyday viewing, one per nearby photo.
@@ -164,7 +164,6 @@ impl PhotoSorter {
 
     pub fn load_photos_from(&mut self, folder: PathBuf) {
         self.photos = files::list_photos(&folder);
-        self.subfolders = files::list_subfolders(&folder);
         self.current_index = 0;
         self.scroll_to_current = true;
         self.textures.clear();
@@ -176,12 +175,43 @@ impl PhotoSorter {
         self.reset_zoom();
         self.loader.forget_pending();
         self.history.clear();
-        self.status = match self.photos.len() {
-            0 => "No images in this folder.".to_string(),
-            1 => "1 photo found.".to_string(),
-            n => format!("{n} photos found."),
-        };
+        self.status = photos_found(self.photos.len());
         self.config.source_folder = Some(folder);
+        self.refresh_subfolders();
+    }
+
+    /// `⟳`: re-reads the source folder after changes made outside the app.
+    /// Unlike `load_photos_from`, keeps the current photo, the selection and
+    /// the undo history.
+    pub fn refresh_source(&mut self) {
+        let Some(source) = self.config.source_folder.clone() else { return };
+        let current = self.current_photo().cloned();
+
+        self.photos = files::list_photos(&source);
+        let present: HashSet<&PathBuf> = self.photos.iter().collect();
+        self.selection.retain(|p| present.contains(p));
+        if let Some(index) = current.and_then(|c| self.photos.iter().position(|p| *p == c)) {
+            self.current_index = index;
+        }
+        self.clamp_index();
+        self.scroll_to_current = true;
+
+        // A file may have been edited in place: decode everything again.
+        self.textures.clear();
+        self.thumbnails.clear();
+        self.unreadable.clear();
+        self.full_texture = None;
+
+        self.refresh_subfolders();
+        self.status = format!("Refreshed. {}", photos_found(self.photos.len()));
+    }
+
+    /// Re-reads the source's subfolders, e.g. after creating one elsewhere.
+    pub fn refresh_subfolders(&mut self) {
+        self.subfolders = match &self.config.source_folder {
+            Some(source) => files::list_subfolders(source),
+            None => Vec::new(),
+        };
     }
 
     pub fn current_photo(&self) -> Option<&PathBuf> {
@@ -338,7 +368,7 @@ impl PhotoSorter {
                 return;
             }
         };
-        self.subfolders = files::list_subfolders(&source);
+        self.refresh_subfolders();
         if self.add_target_folder(path) {
             self.status = format!("\"{}\" added.", self.new_folder_name.trim());
             self.new_folder_name.clear();
@@ -710,6 +740,14 @@ impl PhotoSorter {
     }
 }
 
+fn photos_found(count: usize) -> String {
+    match count {
+        0 => "No images in this folder.".to_string(),
+        1 => "1 photo found.".to_string(),
+        n => format!("{n} photos found."),
+    }
+}
+
 /// File name for status messages.
 fn name_of(path: &Path) -> String {
     path.file_name()
@@ -961,6 +999,26 @@ mod tests {
         assert!(app.new_folder_name.is_empty());
         // The new folder is not a photo.
         assert_eq!(app.photos.len(), 5);
+    }
+
+    #[test]
+    fn refreshing_picks_up_outside_changes_and_keeps_the_context() {
+        let (mut app, _) = sorter_with_photos("refresh");
+        let source = app.config.source_folder.clone().unwrap();
+        app.view = View::Grid;
+        app.click_photo(1, false, false); // select b
+        app.current_index = 3; // on d
+        app.sort_into(0); // b moved: undo history not empty
+        app.click_photo(3, false, false); // select e
+
+        std::fs::remove_file(source.join("a.jpg")).unwrap();
+        std::fs::write(source.join("f.jpg"), "f").unwrap();
+        app.refresh_source();
+
+        assert_eq!(stems(&app.photos), ["c", "d", "e", "f"]);
+        assert_eq!(stems(app.current_photo()), ["e"]);
+        assert_eq!(stems(&app.selection), ["e"]);
+        assert_eq!(app.history.len(), 1);
     }
 
     #[test]

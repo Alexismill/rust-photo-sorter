@@ -273,6 +273,13 @@ impl PhotoSorter {
                 if ui.small_button("🗁").on_hover_text(REVEAL_HINT).clicked() {
                     self.reveal_folder(&folder);
                 }
+                if ui
+                    .small_button("⟳")
+                    .on_hover_text("Refresh the photos and subfolders")
+                    .clicked()
+                {
+                    self.refresh_source();
+                }
             }
         });
         if let Some(folder) = &self.config.source_folder {
