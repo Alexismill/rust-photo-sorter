@@ -1,6 +1,6 @@
 [package]
 name = "photo-sorter"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Alexismill"]
 description = "Keyboard-driven desktop app for triaging photos into folders"
