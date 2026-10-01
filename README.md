@@ -68,7 +68,8 @@ folder.
 
 - Photos are moved, not copied. Nothing is deleted.
 - An existing file is never overwritten: if the name is taken, the photo is
-  saved as `IMG_0042 (1).jpg`.
+  saved as `IMG_0042 (1).jpg`. The same goes for undo, if a file has taken
+  the photo's old name in the meantime.
 - Target folders, shortcuts and the last source folder are remembered between
   runs.
 

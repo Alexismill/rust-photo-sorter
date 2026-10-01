@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Undo no longer overwrites a file that took the photo's name in the
+  meantime: the photo is put back under a free name instead.
+
 ## [0.2.0] - 2026-10-01
 
 Quicker folder handling, without going through the folder dialog.
@@ -40,5 +47,6 @@ First release.
 - Undo (`Ctrl+Z`), a whole batch at once.
 - Photos are moved, never overwritten nor deleted.
 
+[Unreleased]: https://github.com/Alexismill/rust-photo-sorter/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/Alexismill/rust-photo-sorter/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Alexismill/rust-photo-sorter/releases/tag/v0.1.0

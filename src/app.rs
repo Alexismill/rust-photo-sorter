@@ -698,19 +698,29 @@ impl PhotoSorter {
         };
 
         let mut restored = Vec::new();
+        let mut renamed = Vec::new();
         let mut failed = Vec::new();
         let mut error = None;
         // Reverse order: see `sort_into`.
         for record in batch.into_iter().rev() {
-            match files::move_file(&record.to, &record.from) {
+            // Another file may have taken the photo's old name since: put the
+            // photo back under a free name rather than overwrite it.
+            let back = match (record.from.parent(), record.from.file_name()) {
+                (Some(dir), Some(name)) => files::unique_destination(dir, name),
+                _ => record.from.clone(),
+            };
+            match files::move_file(&record.to, &back) {
                 Ok(()) => {
                     if let Some(folder) = record.to.parent() {
                         self.count_moved(folder, -1);
                     }
+                    if back != record.from {
+                        renamed.push(name_of(&back));
+                    }
                     let index = record.index.min(self.photos.len());
-                    self.photos.insert(index, record.from.clone());
+                    self.photos.insert(index, back.clone());
                     self.current_index = index;
-                    restored.push(record.from);
+                    restored.push(back);
                 }
                 Err(e) => {
                     error = Some(e);
@@ -735,6 +745,13 @@ impl PhotoSorter {
             [path] => format!("Undone: {} is back in the source folder.", name_of(path)),
             _ => format!("Undone: {} photos are back in the source folder.", restored.len()),
         };
+        match renamed.as_slice() {
+            [] => {}
+            [new_name] if restored.len() == 1 => {
+                self.status += &format!("  (renamed to {new_name}: that name was taken)");
+            }
+            _ => self.status += &format!("  ({} renamed: names already taken)", renamed.len()),
+        }
         if let Some(e) = error {
             if restored.is_empty() {
                 self.status = format!("Could not undo: {e}");
@@ -1152,6 +1169,24 @@ mod tests {
         app.sort_into(0);
         assert_eq!(files_in(&target), ["z"]);
         assert_eq!(stems(&app.photos), ["z"]);
+    }
+
+    #[test]
+    fn undo_never_overwrites_a_file_that_took_the_name() {
+        let (mut app, target) = sorter_with_photos("undo_no_overwrite");
+        let source = app.config.source_folder.clone().unwrap();
+        app.current_index = 0;
+        app.sort_into(0); // a.jpg -> target
+
+        // A different a.jpg turns up in the source folder meanwhile.
+        std::fs::write(source.join("a.jpg"), "newcomer").unwrap();
+        app.undo();
+
+        assert_eq!(std::fs::read(source.join("a.jpg")).unwrap(), b"newcomer");
+        assert_eq!(std::fs::read(source.join("a (1).jpg")).unwrap(), b"a");
+        assert!(files_in(&target).is_empty());
+        assert_eq!(app.current_photo(), Some(&source.join("a (1).jpg")));
+        assert!(app.history.is_empty());
     }
 
     #[test]

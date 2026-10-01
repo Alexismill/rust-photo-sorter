@@ -153,7 +153,17 @@ pub fn reveal_in_file_manager(folder: &Path) -> std::io::Result<()> {
 
 /// Moves a file. `fs::rename` fails across drives, hence the copy-then-delete
 /// fallback.
+///
+/// Never replaces an existing file: `fs::rename` and `fs::copy` would both
+/// overwrite it without a word. Pick the name with `unique_destination`.
 pub fn move_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    if destination.exists() {
+        let name = destination.file_name().unwrap_or_default().to_string_lossy();
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{name} already exists"),
+        ));
+    }
     match std::fs::rename(source, destination) {
         Ok(()) => Ok(()),
         Err(_) => {
@@ -200,6 +210,18 @@ mod tests {
             b"photo A"
         );
         assert!(!source.exists(), "the source should have been moved away");
+    }
+
+    #[test]
+    fn move_file_never_replaces_an_existing_file() {
+        let dir = temp_dir("no_replace");
+        std::fs::write(dir.join("a.jpg"), b"moving").unwrap();
+        std::fs::write(dir.join("b.jpg"), b"already there").unwrap();
+
+        let result = move_file(&dir.join("a.jpg"), &dir.join("b.jpg"));
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(dir.join("b.jpg")).unwrap(), b"already there");
+        assert!(dir.join("a.jpg").exists(), "the source must stay put");
     }
 
     #[test]
