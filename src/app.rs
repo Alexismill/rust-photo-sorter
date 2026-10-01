@@ -73,6 +73,9 @@ pub struct PhotoSorter {
 
     pub photos: Vec<PathBuf>,
     pub current_index: usize,
+    /// Folders inside the source folder, for quick navigation. Read once per
+    /// folder change, not every frame.
+    pub subfolders: Vec<PathBuf>,
 
     /// Downscaled images for everyday viewing, one per nearby photo.
     pub textures: HashMap<PathBuf, Preview>,
@@ -129,6 +132,7 @@ impl PhotoSorter {
             config,
             photos: Vec::new(),
             current_index: 0,
+            subfolders: Vec::new(),
             textures: HashMap::new(),
             full_texture: None,
             loader: Loader::new(ctx),
@@ -160,7 +164,9 @@ impl PhotoSorter {
 
     pub fn load_photos_from(&mut self, folder: PathBuf) {
         self.photos = files::list_photos(&folder);
+        self.subfolders = files::list_subfolders(&folder);
         self.current_index = 0;
+        self.scroll_to_current = true;
         self.textures.clear();
         self.thumbnails.clear();
         self.unreadable.clear();
@@ -332,6 +338,7 @@ impl PhotoSorter {
                 return;
             }
         };
+        self.subfolders = files::list_subfolders(&source);
         if self.add_target_folder(path) {
             self.status = format!("\"{}\" added.", self.new_folder_name.trim());
             self.new_folder_name.clear();
@@ -509,6 +516,11 @@ impl PhotoSorter {
         let label = folder.display_name();
         if !target_dir.is_dir() {
             self.status = format!("Folder \"{label}\" no longer exists.");
+            return;
+        }
+        // Possible since the source can be changed to one of the targets.
+        if Some(&target_dir) == self.config.source_folder.as_ref() {
+            self.status = format!("\"{label}\" is the source folder.");
             return;
         }
 
@@ -949,6 +961,16 @@ mod tests {
         assert!(app.new_folder_name.is_empty());
         // The new folder is not a photo.
         assert_eq!(app.photos.len(), 5);
+    }
+
+    #[test]
+    fn a_target_opened_as_source_cannot_be_sorted_into() {
+        let (mut app, target) = sorter_with_photos("target_as_source");
+        std::fs::write(target.join("z.jpg"), "z").unwrap();
+        app.load_photos_from(target.clone());
+        app.sort_into(0);
+        assert_eq!(files_in(&target), ["z"]);
+        assert_eq!(stems(&app.photos), ["z"]);
     }
 
     #[test]

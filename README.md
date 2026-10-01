@@ -20,6 +20,10 @@ Clicking a target folder's name also moves the current photo there, and `x`
 removes the folder from the list. `🗁`, next to a target folder or to **Open
 source folder**, shows that folder in the file explorer.
 
+Under the source folder, `⬆ ..` opens its parent and the folders below it
+open a subfolder, to change the source without the dialog. Changing the
+source clears the undo history.
+
 ### Keys
 
 | Key | Action |

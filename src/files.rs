@@ -21,6 +21,21 @@ pub fn list_photos(folder: &Path) -> Vec<PathBuf> {
     photos
 }
 
+/// Lists the folders directly inside `folder`, sorted by name regardless of
+/// case. Hidden ones (".git", ...) are left out.
+pub fn list_subfolders(folder: &Path) -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|p| p.is_dir())
+        .filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')))
+        .collect();
+    folders.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
+    folders
+}
+
 pub fn is_supported_image(path: &Path) -> bool {
     path.extension()
         .and_then(OsStr::to_str)
@@ -174,6 +189,21 @@ mod tests {
 
         // sorted by name, extensions case-insensitive, directories excluded
         assert_eq!(photos, vec!["a.PNG", "b.jpg", "c.jpeg"]);
+    }
+
+    #[test]
+    fn lists_visible_subfolders_only() {
+        let dir = temp_dir("subfolders");
+        for name in ["b", "A", "c", ".hidden"] {
+            std::fs::create_dir(dir.join(name)).unwrap();
+        }
+        std::fs::write(dir.join("photo.jpg"), b"x").unwrap();
+
+        let names: Vec<String> = list_subfolders(&dir)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["A", "b", "c"]);
     }
 
     #[test]
