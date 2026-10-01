@@ -478,6 +478,24 @@ impl PhotoSorter {
         }
     }
 
+    /// Something dropped on the window: a folder becomes the source, a photo
+    /// opens its folder on that photo.
+    pub fn open_dropped(&mut self, path: PathBuf) {
+        if path.is_dir() {
+            self.load_photos_from(path);
+            return;
+        }
+        let folder = path.parent().filter(|_| files::is_supported_image(&path));
+        let Some(folder) = folder.map(Path::to_path_buf) else {
+            self.status = "Drop a folder or a photo to open it.".into();
+            return;
+        };
+        self.load_photos_from(folder);
+        if let Some(index) = self.photos.iter().position(|p| *p == path) {
+            self.current_index = index;
+        }
+    }
+
     pub fn reveal_folder(&mut self, folder: &Path) {
         if !folder.is_dir() {
             self.status = format!("Folder \"{}\" no longer exists.", name_of(folder));
@@ -1197,6 +1215,26 @@ mod tests {
         assert_eq!(stems(&app.photos), ["b", "c", "d", "e"]);
         assert_eq!(stems(app.current_photo()), ["c"]);
         assert_ne!(app.status, "kept");
+    }
+
+    #[test]
+    fn dropping_a_folder_or_a_photo_opens_it() {
+        let (mut app, target) = sorter_with_photos("drop");
+        let source = app.config.source_folder.clone().unwrap();
+
+        app.open_dropped(target.clone());
+        assert_eq!(app.config.source_folder.as_ref(), Some(&target));
+
+        // A photo opens its folder, on that photo.
+        app.open_dropped(source.join("c.jpg"));
+        assert_eq!(app.config.source_folder.as_ref(), Some(&source));
+        assert_eq!(stems(app.current_photo()), ["c"]);
+
+        // Anything else is refused.
+        std::fs::write(source.join("notes.txt"), "x").unwrap();
+        app.open_dropped(source.join("notes.txt"));
+        assert_eq!(app.config.source_folder.as_ref(), Some(&source));
+        assert_eq!(stems(app.current_photo()), ["c"]);
     }
 
     #[test]

@@ -32,6 +32,12 @@ impl App for PhotoSorter {
             return;
         }
 
+        // Only the first item counts if several are dropped at once.
+        let dropped = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
+        if let Some(path) = dropped {
+            self.open_dropped(path);
+        }
+
         self.handle_shortcuts(&ctx);
         if self.view == View::Single {
             self.request_nearby();
@@ -53,7 +59,27 @@ impl App for PhotoSorter {
             View::Single => self.photo_panel(ui),
             View::Grid => self.grid_panel(ui),
         });
+
+        if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
+            drop_overlay(&ctx);
+        }
     }
+}
+
+/// Dims the window while something is dragged over it, so it is clear that
+/// dropping will do something.
+fn drop_overlay(ctx: &egui::Context) {
+    let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("drop_overlay"));
+    let painter = ctx.layer_painter(layer);
+    let rect = ctx.content_rect();
+    painter.rect_filled(rect, 0.0, Color32::from_black_alpha(180));
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "Drop to open as the source folder",
+        egui::FontId::proportional(24.0),
+        Color32::WHITE,
+    );
 }
 
 impl PhotoSorter {

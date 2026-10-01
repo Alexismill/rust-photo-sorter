@@ -8,7 +8,8 @@ Supported formats: JPEG, PNG, WebP, BMP, TIFF, GIF.
 
 ## Usage
 
-1. **Open source folder**: the folder holding the photos to sort.
+1. **Open source folder**: the folder holding the photos to sort. You can
+   also drop the folder on the window, or a photo to open its folder on it.
 2. **+ Add target folder**: once per destination. Or type a name in the
    **New folder** field (`Ctrl+N`) and press `Enter`: the folder is created
    inside the source folder, added, and waits for its key.

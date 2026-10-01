@@ -11,6 +11,8 @@ project follows [Semantic Versioning](https://semver.org/).
 - The source folder is re-read when the window gets the focus back, to pick
   up photos and folders added or removed meanwhile. `⟳` stays, to also
   reload photos edited in place.
+- Drop a folder on the window to open it as the source folder, or a photo to
+  open its folder on that photo.
 
 ### Fixed
 
