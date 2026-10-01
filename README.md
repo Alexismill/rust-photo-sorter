@@ -27,8 +27,10 @@ source clears the undo history. `+` in front of a subfolder adds it to the
 target folders and waits for its key (`✔` when it already is one). Each
 subfolder shows how many photos it holds.
 
-`⟳` re-reads the source folder after changes made outside the app. It keeps
-the current photo, the selection and the undo history.
+The source folder is re-read each time the window gets the focus back, to
+pick up photos and folders added or removed meanwhile. `⟳` does the same by
+hand, and also reloads photos edited in place. Both keep the current photo,
+the selection and the undo history.
 
 To sort a series of folders, `Alt+→` opens the next one, and an emptied folder
 offers it with a button. Target folders are skipped.

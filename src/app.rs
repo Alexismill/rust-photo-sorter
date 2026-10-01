@@ -121,6 +121,8 @@ pub struct PhotoSorter {
     pub new_folder_name: String,
     /// Set by `Ctrl+N`, so the sidebar puts the cursor in that field.
     pub focus_new_folder: bool,
+    /// Whether the window had the focus last frame, to spot it coming back.
+    pub window_focused: bool,
     /// One entry per sort action, so a batch is undone in a single step.
     pub history: Vec<Vec<MoveRecord>>,
     pub status: String,
@@ -158,6 +160,7 @@ impl PhotoSorter {
             listening_for_key: None,
             new_folder_name: String::new(),
             focus_new_folder: false,
+            window_focused: true,
             history: Vec::new(),
             status: String::new(),
         };
@@ -195,16 +198,7 @@ impl PhotoSorter {
     /// the undo history.
     pub fn refresh_source(&mut self) {
         let Some(source) = self.config.source_folder.clone() else { return };
-        let current = self.current_photo().cloned();
-
-        self.photos = files::list_photos(&source);
-        let present: HashSet<&PathBuf> = self.photos.iter().collect();
-        self.selection.retain(|p| present.contains(p));
-        if let Some(index) = current.and_then(|c| self.photos.iter().position(|p| *p == c)) {
-            self.current_index = index;
-        }
-        self.clamp_index();
-        self.scroll_to_current = true;
+        self.replace_photos(files::list_photos(&source));
 
         // A file may have been edited in place: decode everything again.
         self.textures.clear();
@@ -214,6 +208,34 @@ impl PhotoSorter {
 
         self.refresh_folders();
         self.status = format!("Refreshed. {}", photos_found(self.photos.len()));
+    }
+
+    /// When the window gets the focus back: picks up photos and folders added
+    /// or removed meanwhile. Lighter than `⟳`: decoded images are kept, so
+    /// switching windows never flickers, and nothing shows if nothing changed.
+    pub fn refresh_on_focus(&mut self) {
+        let Some(source) = self.config.source_folder.clone() else { return };
+        self.refresh_folders();
+        let photos = files::list_photos(&source);
+        if photos != self.photos {
+            self.replace_photos(photos);
+            self.status = format!("Source folder changed. {}", photos_found(self.photos.len()));
+        }
+    }
+
+    /// Swaps in a fresh listing of the source folder, keeping the current
+    /// photo and the selection where they still exist.
+    fn replace_photos(&mut self, photos: Vec<PathBuf>) {
+        let current = self.current_photo().cloned();
+        self.photos = photos;
+        let present: HashSet<&PathBuf> = self.photos.iter().collect();
+        self.selection.retain(|p| present.contains(p));
+        if let Some(index) = current.and_then(|c| self.photos.iter().position(|p| *p == c)) {
+            self.current_index = index;
+        }
+        self.clamp_index();
+        self.drop_stale_full_texture();
+        self.scroll_to_current = true;
     }
 
     /// Re-reads the source's subfolders and its next sibling, e.g. after
@@ -1159,6 +1181,22 @@ mod tests {
         assert_eq!(stems(app.current_photo()), ["e"]);
         assert_eq!(stems(&app.selection), ["e"]);
         assert_eq!(app.history.len(), 1);
+    }
+
+    #[test]
+    fn refreshing_on_focus_is_silent_when_nothing_changed() {
+        let (mut app, _) = sorter_with_photos("refresh_on_focus");
+        let source = app.config.source_folder.clone().unwrap();
+        app.status = "kept".into();
+        app.refresh_on_focus();
+        assert_eq!(app.status, "kept");
+
+        app.current_index = 2; // on c
+        std::fs::remove_file(source.join("a.jpg")).unwrap();
+        app.refresh_on_focus();
+        assert_eq!(stems(&app.photos), ["b", "c", "d", "e"]);
+        assert_eq!(stems(app.current_photo()), ["c"]);
+        assert_ne!(app.status, "kept");
     }
 
     #[test]

@@ -6,6 +6,12 @@ project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- The source folder is re-read when the window gets the focus back, to pick
+  up photos and folders added or removed meanwhile. `⟳` stays, to also
+  reload photos edited in place.
+
 ### Fixed
 
 - Undo no longer overwrites a file that took the photo's name in the

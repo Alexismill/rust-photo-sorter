@@ -18,6 +18,13 @@ impl App for PhotoSorter {
         let ctx = ui.ctx().clone();
         self.collect_loaded(&ctx);
 
+        // Back from the file explorer: pick up what changed there.
+        let focused = ctx.input(|i| i.focused);
+        if focused && !self.window_focused {
+            self.refresh_on_focus();
+        }
+        self.window_focused = focused;
+
         // The "press a key" mode takes over the whole window and short-circuits
         // the shortcuts, otherwise the chosen key would also trigger a move.
         if self.listening_for_key.is_some() {
