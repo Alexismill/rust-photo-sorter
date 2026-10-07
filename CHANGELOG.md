@@ -15,6 +15,12 @@ project follows [Semantic Versioning](https://semver.org/).
   open its folder on that photo.
 - `Alt+↑` opens the parent of the source folder.
 
+### Changed
+
+- Changing the source folder no longer clears the undo history: `Ctrl+Z`
+  puts photos back in the folder they came from, even after moving on to
+  another one.
+
 ### Fixed
 
 - Undo no longer overwrites a file that took the photo's name in the

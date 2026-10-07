@@ -31,15 +31,14 @@ impl PhotoSorter {
         self.full_texture = None;
         self.reset_zoom();
         self.loader.forget_pending();
-        self.history.clear();
+        // The history is kept: undo moves photos back wherever they came from.
         self.status = photos_found(self.photos.len());
         self.config.source_folder = Some(folder);
         self.refresh_folders();
     }
 
     /// `⟳`: re-reads the source folder after changes made outside the app.
-    /// Unlike `load_photos_from`, keeps the current photo, the selection and
-    /// the undo history.
+    /// Unlike `load_photos_from`, keeps the current photo and the selection.
     pub fn refresh_source(&mut self) {
         let Some(source) = self.config.source_folder.clone() else { return };
         self.replace_photos(files::list_photos(&source));
@@ -273,7 +272,8 @@ fn photos_found(count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use crate::app::tests::{sorter_with_photos, stems};
-    use crate::app::View;
+    use crate::app::{PhotoSorter, View};
+    use std::path::PathBuf;
 
     #[test]
     fn a_new_folder_is_created_in_the_source_and_awaits_its_key() {
@@ -381,6 +381,63 @@ mod tests {
         assert_eq!(stems(&app.photos), ["b", "c", "d", "e"]);
         assert_eq!(stems(app.current_photo()), ["c"]);
         assert_ne!(app.status, "kept");
+    }
+
+    /// The app sorting `a.jpg` into its target, then a sibling folder holding
+    /// `z.jpg`, not opened yet.
+    fn sorted_then_other_folder(test: &str) -> (PhotoSorter, PathBuf, PathBuf, PathBuf) {
+        let (mut app, target) = sorter_with_photos(test);
+        let source = app.config.source_folder.clone().unwrap();
+        let other = source.parent().unwrap().join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(other.join("z.jpg"), "z").unwrap();
+        app.current_index = 0;
+        app.sort_into(0); // a.jpg -> target
+        (app, source, target, other)
+    }
+
+    #[test]
+    fn undo_still_works_after_opening_another_folder() {
+        let (mut app, source, target, other) = sorted_then_other_folder("undo_other_folder");
+        app.load_photos_from(other.clone());
+        app.undo();
+
+        assert_eq!(std::fs::read(source.join("a.jpg")).unwrap(), b"a");
+        assert!(!target.join("a.jpg").exists());
+        // The folder on screen is left alone, and the status says where it went.
+        assert_eq!(app.config.source_folder.as_ref(), Some(&other));
+        assert_eq!(stems(&app.photos), ["z"]);
+        assert!(app.status.contains("\"source\""), "status: {}", app.status);
+        assert!(app.history.is_empty());
+    }
+
+    #[test]
+    fn undo_after_coming_back_puts_the_photo_back_in_its_place() {
+        let (mut app, source, _, other) = sorted_then_other_folder("undo_come_back");
+        app.load_photos_from(other);
+        app.load_photos_from(source.clone());
+        app.undo();
+
+        let order: Vec<PathBuf> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|name| source.join(format!("{name}.jpg")))
+            .collect();
+        assert_eq!(app.photos, order);
+        assert_eq!(app.current_photo(), Some(&source.join("a.jpg")));
+        assert!(app.status.contains("the source folder"), "status: {}", app.status);
+    }
+
+    #[test]
+    fn undo_with_the_target_open_takes_the_photo_out_of_the_list() {
+        let (mut app, source, target, _) = sorted_then_other_folder("undo_from_target");
+        app.load_photos_from(target.clone());
+        assert_eq!(stems(&app.photos), ["a"]);
+        app.undo();
+
+        assert_eq!(std::fs::read(source.join("a.jpg")).unwrap(), b"a");
+        assert!(app.photos.is_empty(), "still listed: {:?}", app.photos);
+        assert_eq!(app.current_photo(), None);
+        assert!(app.status.contains("\"source\""), "status: {}", app.status);
     }
 
     #[test]

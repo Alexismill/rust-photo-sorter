@@ -66,7 +66,8 @@ pub enum View {
 pub struct MoveRecord {
     pub from: PathBuf,
     pub to: PathBuf,
-    /// Position in `photos` at the moment it was removed.
+    /// Position in `photos` at the moment it was removed. Only meaningful
+    /// while `from`'s folder is the source; clamped on undo.
     pub index: usize,
 }
 
@@ -448,13 +449,7 @@ impl PhotoSorter {
             // Photos leave the list one at a time, in list order, and each
             // record keeps its index at that moment. Undoing in reverse order
             // then puts every photo back exactly where it was.
-            self.photos.remove(index);
-            if index < self.current_index {
-                self.current_index -= 1;
-            }
-            self.textures.remove(&source);
-            self.thumbnails.remove(&source);
-            self.selection.remove(&source);
+            self.remove_from_list(index);
             batch.push(MoveRecord {
                 from: source,
                 to: destination,
@@ -499,6 +494,9 @@ impl PhotoSorter {
             return;
         };
 
+        // The source may have changed since the batch was sorted: photos go
+        // back to their own folder, and into the list only if that is it.
+        let source = self.config.source_folder.clone();
         let mut restored = Vec::new();
         let mut renamed = Vec::new();
         let mut failed = Vec::new();
@@ -516,12 +514,21 @@ impl PhotoSorter {
                     if let Some(folder) = record.to.parent() {
                         self.count_moved(folder, -1);
                     }
+                    if let Some(folder) = back.parent() {
+                        self.count_moved(folder, 1);
+                    }
                     if back != record.from {
                         renamed.push(name_of(&back));
                     }
-                    let index = record.index.min(self.photos.len());
-                    self.photos.insert(index, back.clone());
-                    self.current_index = index;
+                    // The target may be the folder on screen: it leaves it.
+                    if let Some(index) = self.photos.iter().position(|p| *p == record.to) {
+                        self.remove_from_list(index);
+                    }
+                    if back.parent() == source.as_deref() {
+                        let index = record.index.min(self.photos.len());
+                        self.photos.insert(index, back.clone());
+                        self.current_index = index;
+                    }
                     restored.push(back);
                 }
                 Err(e) => {
@@ -535,17 +542,24 @@ impl PhotoSorter {
             failed.reverse();
             self.history.push(failed);
         }
+        self.clamp_index();
         self.drop_stale_full_texture();
         self.scroll_to_current = true;
         // Reselect a restored batch, so it can be sorted again at once.
-        if self.view == View::Grid && !restored.is_empty() {
-            self.selection = restored.iter().cloned().collect();
+        let on_screen: Vec<&PathBuf> = restored.iter().filter(|p| self.photos.contains(p)).collect();
+        if self.view == View::Grid && !on_screen.is_empty() {
+            self.selection = on_screen.into_iter().cloned().collect();
         }
 
+        // A batch comes from a single folder, so the first photo tells which.
+        let place = match restored.first().and_then(|p| p.parent()) {
+            Some(folder) if Some(folder) != source.as_deref() => format!("\"{}\"", name_of(folder)),
+            _ => "the source folder".to_string(),
+        };
         self.status = match restored.as_slice() {
             [] => String::new(),
-            [path] => format!("Undone: {} is back in the source folder.", name_of(path)),
-            _ => format!("Undone: {} photos are back in the source folder.", restored.len()),
+            [path] => format!("Undone: {} is back in {place}.", name_of(path)),
+            _ => format!("Undone: {} photos are back in {place}.", restored.len()),
         };
         match renamed.as_slice() {
             [] => {}
@@ -561,6 +575,18 @@ impl PhotoSorter {
                 self.status += &format!("  Some could not be moved back: {e}");
             }
         }
+    }
+
+    /// Takes the photo at `index` out of the list and its caches, keeping the
+    /// current photo on screen when an earlier one goes.
+    fn remove_from_list(&mut self, index: usize) {
+        let path = self.photos.remove(index);
+        if index < self.current_index {
+            self.current_index -= 1;
+        }
+        self.textures.remove(&path);
+        self.thumbnails.remove(&path);
+        self.selection.remove(&path);
     }
 
     // ── Textures ────────────────────────────────────────────────────────────

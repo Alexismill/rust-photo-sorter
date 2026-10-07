@@ -23,10 +23,12 @@ source folder**, shows that folder in the file explorer.
 
 The source folder's path is clickable: `D: › Photos › 2024` opens any of these
 folders in one click. Under it, `⬆ ..` opens the parent and the folders below
-it open a subfolder, to change the source without the dialog. Changing the
-source clears the undo history. `+` in front of a subfolder adds it to the
-target folders and waits for its key (`✔` when it already is one). Each
-subfolder shows how many photos it holds.
+it open a subfolder, to change the source without the dialog. `+` in front
+of a subfolder adds it to the target folders and waits for its key (`✔` when
+it already is one). Each subfolder shows how many photos it holds.
+
+Changing the source keeps the undo history: `Ctrl+Z` still puts the last
+photos back in the folder they came from, even once another one is open.
 
 The source folder is re-read each time the window gets the focus back, to
 pick up photos and folders added or removed meanwhile. `⟳` does the same by
