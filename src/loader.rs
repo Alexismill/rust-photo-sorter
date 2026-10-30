@@ -10,6 +10,7 @@ use egui::ColorImage;
 use image::ImageDecoder; // brings the .orientation() method onto the decoder
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -27,17 +28,24 @@ pub enum Quality {
     Thumb,
     /// Scaled down to [`MAX_DISPLAY_PX`]: what the fit-to-window view needs.
     Preview,
-    /// Every pixel, for 1:1 zoom. Expensive, so only ever one at a time.
+    /// Every pixel, for 1:1 zoom, bar the downscaling the GPU's texture
+    /// limit forces on a very large photo. Expensive, so only ever one at a
+    /// time.
     Full,
 }
 
 impl Quality {
-    fn max_size(self) -> Option<u32> {
-        match self {
-            Quality::Thumb => Some(THUMB_PX),
-            Quality::Preview => Some(MAX_DISPLAY_PX),
-            Quality::Full => None,
-        }
+    /// Longest side the decoded image may have, never more than what the GPU
+    /// accepts: a bigger texture is a wgpu validation error, and its default
+    /// handler panics, so the window simply disappears in a release build.
+    fn max_size(self, max_texture_side: u32) -> u32 {
+        let wanted = match self {
+            Quality::Thumb => THUMB_PX,
+            Quality::Preview => MAX_DISPLAY_PX,
+            Quality::Full => u32::MAX,
+        };
+        // A limit of 0 would decode to an empty image; one pixel at worst.
+        wanted.min(max_texture_side.max(1))
     }
 }
 
@@ -50,8 +58,10 @@ pub struct Decoded {
 
 pub type LoadResult = (PathBuf, Quality, Result<Decoded, String>);
 
-/// Decodes an image and applies its EXIF orientation.
-pub fn decode(path: &Path, quality: Quality) -> Result<Decoded, String> {
+/// Decodes an image and applies its EXIF orientation. `max_texture_side` is
+/// the GPU's texture size limit: the result never exceeds it, whatever the
+/// quality asked for.
+pub fn decode(path: &Path, quality: Quality, max_texture_side: u32) -> Result<Decoded, String> {
     let reader = image::ImageReader::open(path)
         .map_err(|e| e.to_string())?
         .with_guessed_format()
@@ -71,10 +81,9 @@ pub fn decode(path: &Path, quality: Quality) -> Result<Decoded, String> {
     // Measured after rotation, so a portrait shot reports portrait dimensions.
     let original_size = egui::Vec2::new(img.width() as f32, img.height() as f32);
 
-    if let Some(max) = quality.max_size() {
-        if img.width().max(img.height()) > max {
-            img = img.thumbnail(max, max);
-        }
+    let max = quality.max_size(max_texture_side);
+    if img.width().max(img.height()) > max {
+        img = img.thumbnail(max, max);
     }
 
     let rgba = img.into_rgba8();
@@ -95,17 +104,39 @@ pub struct Loader {
     thumbs: Arc<ThumbQueue>,
     receiver: Receiver<LoadResult>,
     pending: Vec<(PathBuf, Quality)>,
+    /// The GPU's texture size limit, shared with the decoding threads. Only
+    /// a running frame can report it (see [`Self::set_max_texture_side`]),
+    /// hence the atomic rather than a value fixed at startup.
+    max_texture_side: Arc<AtomicU32>,
 }
 
 impl Loader {
     pub fn new(ctx: egui::Context) -> Self {
         let (result_tx, result_rx) = std::sync::mpsc::channel::<LoadResult>();
-        let preview_sender = spawn_worker(Quality::Preview, result_tx.clone(), ctx.clone());
-        let full_sender = spawn_worker(Quality::Full, result_tx.clone(), ctx.clone());
+        // egui's own starting value, which every GPU supports, until the first
+        // frame reports the real one.
+        let max_texture_side = Arc::new(AtomicU32::new(2048));
+        let preview_sender = spawn_worker(
+            Quality::Preview,
+            result_tx.clone(),
+            ctx.clone(),
+            max_texture_side.clone(),
+        );
+        let full_sender = spawn_worker(
+            Quality::Full,
+            result_tx.clone(),
+            ctx.clone(),
+            max_texture_side.clone(),
+        );
 
         let thumbs = Arc::new(ThumbQueue::default());
         for _ in 0..thumb_worker_count() {
-            spawn_thumb_worker(thumbs.clone(), result_tx.clone(), ctx.clone());
+            spawn_thumb_worker(
+                thumbs.clone(),
+                result_tx.clone(),
+                ctx.clone(),
+                max_texture_side.clone(),
+            );
         }
 
         Self {
@@ -114,7 +145,17 @@ impl Loader {
             thumbs,
             receiver: result_rx,
             pending: Vec::new(),
+            max_texture_side,
         }
+    }
+
+    /// Tells the decoding threads how large a texture the GPU accepts, read
+    /// from egui once a frame. A photo wider or taller than this (a 9504 px
+    /// Sony A7R IV frame against the usual 8192 px limit) used to be handed
+    /// to wgpu whole at [`Quality::Full`], which killed the window.
+    pub fn set_max_texture_side(&self, side: usize) {
+        let side = u32::try_from(side).unwrap_or(u32::MAX);
+        self.max_texture_side.store(side, Ordering::Relaxed);
     }
 
     pub fn is_pending(&self, path: &Path, quality: Quality) -> bool {
@@ -217,7 +258,12 @@ fn thumb_worker_count() -> usize {
         .clamp(1, 4)
 }
 
-fn spawn_thumb_worker(queue: Arc<ThumbQueue>, results: Sender<LoadResult>, ctx: egui::Context) {
+fn spawn_thumb_worker(
+    queue: Arc<ThumbQueue>,
+    results: Sender<LoadResult>,
+    ctx: egui::Context,
+    max_texture_side: Arc<AtomicU32>,
+) {
     std::thread::spawn(move || loop {
         let path = {
             let mut state = queue.lock();
@@ -233,7 +279,11 @@ fn spawn_thumb_worker(queue: Arc<ThumbQueue>, results: Sender<LoadResult>, ctx: 
             }
         };
 
-        let result = decode(&path, Quality::Thumb);
+        let result = decode(
+            &path,
+            Quality::Thumb,
+            max_texture_side.load(Ordering::Relaxed),
+        );
         // Send before leaving `in_flight`: the other order leaves a moment
         // where the UI has no texture and no in-flight entry, and would
         // queue the same thumbnail again.
@@ -251,6 +301,7 @@ fn spawn_worker(
     quality: Quality,
     results: Sender<LoadResult>,
     ctx: egui::Context,
+    max_texture_side: Arc<AtomicU32>,
 ) -> Sender<PathBuf> {
     let (request_tx, request_rx) = std::sync::mpsc::channel::<PathBuf>();
 
@@ -258,7 +309,7 @@ fn spawn_worker(
         // recv() blocks without burning CPU, and returns Err once the other
         // end of the channel is dropped, i.e. when the app shuts down.
         while let Ok(path) = request_rx.recv() {
-            let result = decode(&path, quality);
+            let result = decode(&path, quality, max_texture_side.load(Ordering::Relaxed));
             if results.send((path, quality, result)).is_err() {
                 break;
             }
@@ -274,6 +325,10 @@ fn spawn_worker(
 mod tests {
     use super::*;
 
+    /// A limit no test image comes close to, for the cases that are not about
+    /// the GPU's texture size.
+    const NO_GPU_LIMIT: u32 = 16384;
+
     fn fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
@@ -285,8 +340,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("large.png");
         if !path.exists() {
+            // The tests run in parallel and share this file: write it under a
+            // private name and move it into place, or one of them decodes a
+            // half-written PNG ("unexpected end of file").
+            let partial = dir.join(format!("large-{:?}.png", std::thread::current().id()));
             let large = image::RgbImage::new(MAX_DISPLAY_PX + 1200, MAX_DISPLAY_PX);
-            image::DynamicImage::ImageRgb8(large).save(&path).unwrap();
+            image::DynamicImage::ImageRgb8(large).save(&partial).unwrap();
+            std::fs::rename(&partial, &path).unwrap();
         }
         path
     }
@@ -295,7 +355,12 @@ mod tests {
     fn applies_exif_orientation() {
         // The file is 200x100 on disk and carries EXIF Orientation = 6
         // (rotate 90 degrees), so it must come out as 100x200.
-        let decoded = decode(&fixture("portrait_exif.jpg"), Quality::Preview).unwrap();
+        let decoded = decode(
+            &fixture("portrait_exif.jpg"),
+            Quality::Preview,
+            NO_GPU_LIMIT,
+        )
+        .unwrap();
         assert_eq!(
             decoded.image.size,
             [100, 200],
@@ -305,7 +370,7 @@ mod tests {
 
     #[test]
     fn preview_scales_large_images_down() {
-        let decoded = decode(&large_image_path(), Quality::Preview).unwrap();
+        let decoded = decode(&large_image_path(), Quality::Preview, NO_GPU_LIMIT).unwrap();
         let size = decoded.image.size;
         assert!(
             size[0].max(size[1]) <= MAX_DISPLAY_PX as usize,
@@ -319,7 +384,7 @@ mod tests {
 
     #[test]
     fn thumbnails_are_scaled_to_thumb_size() {
-        let decoded = decode(&large_image_path(), Quality::Thumb).unwrap();
+        let decoded = decode(&large_image_path(), Quality::Thumb, NO_GPU_LIMIT).unwrap();
         assert_eq!(decoded.image.size[0], THUMB_PX as usize);
         assert!(decoded.image.size[1] < THUMB_PX as usize);
     }
@@ -328,7 +393,7 @@ mod tests {
     fn a_preview_still_reports_the_original_size() {
         // Zoom levels are expressed against the real image, so a downscaled
         // preview must still say how big the photo actually is.
-        let decoded = decode(&large_image_path(), Quality::Preview).unwrap();
+        let decoded = decode(&large_image_path(), Quality::Preview, NO_GPU_LIMIT).unwrap();
         assert_eq!(
             decoded.original_size,
             egui::Vec2::new((MAX_DISPLAY_PX + 1200) as f32, MAX_DISPLAY_PX as f32)
@@ -339,12 +404,43 @@ mod tests {
     #[test]
     fn full_quality_keeps_every_pixel() {
         // This is what makes 1:1 zoom meaningful: no resampling at all, so
-        // what the user inspects is the real sensor data.
-        let decoded = decode(&large_image_path(), Quality::Full).unwrap();
+        // what the user inspects is the real sensor data. Only the GPU's
+        // texture limit ever gets in the way (see the test below).
+        let decoded = decode(&large_image_path(), Quality::Full, NO_GPU_LIMIT).unwrap();
         assert_eq!(
             decoded.image.size,
             [(MAX_DISPLAY_PX + 1200) as usize, MAX_DISPLAY_PX as usize]
         );
+    }
+
+    #[test]
+    fn full_quality_stays_within_the_gpu_texture_limit() {
+        // A photo wider than the GPU's limit (a 9504 px Sony A7R IV frame
+        // against the usual 8192 px) used to reach wgpu whole, which killed
+        // the window in release builds.
+        let limit = MAX_DISPLAY_PX + 600;
+        let decoded = decode(&large_image_path(), Quality::Full, limit).unwrap();
+        assert_eq!(
+            decoded.image.size[0], limit as usize,
+            "the long side was not capped at the texture limit: {:?}",
+            decoded.image.size
+        );
+        assert!(decoded.image.size[1] < limit as usize);
+        // Zoom is still expressed against the real photo, so framing is
+        // unchanged by the cap.
+        assert_eq!(
+            decoded.original_size,
+            egui::Vec2::new((MAX_DISPLAY_PX + 1200) as f32, MAX_DISPLAY_PX as f32)
+        );
+    }
+
+    #[test]
+    fn a_preview_stays_within_a_smaller_gpu_texture_limit() {
+        // Some devices report less than MAX_DISPLAY_PX; previews are capped
+        // too, not just full-resolution decodes.
+        let limit = 1024;
+        let decoded = decode(&large_image_path(), Quality::Preview, limit).unwrap();
+        assert_eq!(decoded.image.size[0], limit as usize);
     }
 
     #[test]
@@ -355,7 +451,7 @@ mod tests {
         std::fs::write(&path, b"this is not an image").unwrap();
 
         assert!(
-            decode(&path, Quality::Preview).is_err(),
+            decode(&path, Quality::Preview, NO_GPU_LIMIT).is_err(),
             "should have returned an error"
         );
     }

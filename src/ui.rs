@@ -16,6 +16,10 @@ impl App for PhotoSorter {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // Only a running frame knows the GPU's texture limit, and decoding has
+        // to stay under it: a larger texture crashes wgpu.
+        self.loader
+            .set_max_texture_side(ctx.input(|i| i.max_texture_side));
         self.collect_loaded(&ctx);
 
         // Back from the file explorer: pick up what changed there.
